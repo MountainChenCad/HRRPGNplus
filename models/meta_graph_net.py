@@ -163,17 +163,6 @@ class MetaHRRPNet(nn.Module):
         adj_tensor = adj_matrix.unsqueeze(1)
         return adj_tensor
 
-    def _apply_attention(self, x):
-        """应用注意力机制"""
-        if self.use_meta_attention:
-            # 更复杂的元注意力
-            attention_logits = self.attention(x).transpose(1, 2)
-            attention_weights = F.softmax(attention_logits, dim=1)
-        else:
-            # 原始注意力
-            attention_weights = F.softmax(self.attention(x), dim=1)
-        return attention_weights
-
     def get_embedding(self, x, distance_matrix=None):
         """获取特征嵌入（用于可视化和分析）"""
         # 前向传播，但仅返回注意力前的特征
