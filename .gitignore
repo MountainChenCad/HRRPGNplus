@@ -2,3 +2,6 @@
 /data/train
 /data/val
 /results
+/data/test_fewshots
+/data/train_fewshots
+/data/val_fewshots

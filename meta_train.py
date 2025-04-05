@@ -201,9 +201,9 @@ def main():
 
     # 加载数据集
     logger.info("加载数据集...")
-    train_dir = os.path.join(args.data_root, 'train')
-    val_dir = os.path.join(args.data_root, 'val')
-    test_dir = os.path.join(args.data_root, 'test')
+    train_dir = os.path.join(args.data_root, 'train_fewshots')
+    val_dir = os.path.join(args.data_root, 'val_fewshots')
+    test_dir = os.path.join(args.data_root, 'test_fewshots')
 
     train_dataset = HRRPDataset(train_dir)
     val_dataset = HRRPDataset(val_dir)
