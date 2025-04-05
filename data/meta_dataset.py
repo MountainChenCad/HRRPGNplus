@@ -59,6 +59,9 @@ class TaskSampler:
         # 随机选择N个类别
         selected_classes = np.random.choice(len(self.dataset.classes), self.n_way, replace=False)
 
+        # 创建原始类别ID到任务类别ID的映射 (0 to N-1)
+        class_map = {original_idx: task_idx for task_idx, original_idx in enumerate(selected_classes)}
+
         # 为每个类别采样K+Q个样本
         support_set = []
         query_set = []
@@ -74,12 +77,16 @@ class TaskSampler:
             # 前K个用于支持集
             for idx in selected_indices[:self.k_shot]:
                 data, _ = self.dataset.get_sample_by_class(class_idx, idx)
-                support_set.append((data, class_idx))
+                # 使用映射的类别ID (0 to N-1) 而不是原始类别ID
+                remapped_class_idx = class_map[class_idx]
+                support_set.append((data, remapped_class_idx))
 
             # 后Q个用于查询集
             for idx in selected_indices[self.k_shot:]:
                 data, _ = self.dataset.get_sample_by_class(class_idx, idx)
-                query_set.append((data, class_idx))
+                # 使用映射的类别ID (0 to N-1) 而不是原始类别ID
+                remapped_class_idx = class_map[class_idx]
+                query_set.append((data, remapped_class_idx))
 
         # 打乱支持集和查询集
         random.shuffle(support_set)
@@ -91,7 +98,9 @@ class TaskSampler:
             'query_x': torch.stack([item[0] for item in query_set]),
             'query_y': torch.tensor([item[1] for item in query_set]),
             'n_way': self.n_way,
-            'k_shot': self.k_shot
+            'k_shot': self.k_shot,
+            'selected_classes': selected_classes,  # Store original class indices for reference
+            'class_map': class_map  # Store the mapping for reference
         }
 
     def sample(self, batch_size=1):

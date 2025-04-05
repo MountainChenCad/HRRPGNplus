@@ -131,6 +131,18 @@ class MAMLTrainer:
         task_losses = []
         task_accuracies = []
 
+        # # Print input shapes and target info for debugging
+        # print(f"Support X shape: {support_x.shape}, Support Y shape: {support_y.shape}")
+        # print(f"Support Y values: min={support_y.min().item()}, max={support_y.max().item()}")
+        # print(f"Number of classes in model: {self.model.num_classes}")
+
+        # Validate target values
+        if support_y.max() >= self.model.num_classes:
+            raise ValueError(
+                f"Target labels (max={support_y.max().item()}) exceed model classes ({self.model.num_classes})")
+        if support_y.min() < 0:
+            raise ValueError(f"Negative target labels found: min={support_y.min().item()}")
+
         # 克隆模型参数，用于内循环适应
         fast_weights = OrderedDict(
             (name, param.clone()) for (name, param) in self.model.named_parameters()
@@ -143,6 +155,9 @@ class MAMLTrainer:
                 logits, _ = self.model(support_x, self.distance_matrix)
             else:
                 logits = self.model(support_x, self.distance_matrix)
+
+            # Validate output
+            # print(f"Logits shape: {logits.shape}, Target shape: {support_y.shape}")
 
             # 计算损失
             loss = F.cross_entropy(logits, support_y)
