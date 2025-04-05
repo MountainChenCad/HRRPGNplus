@@ -28,7 +28,7 @@ class MetaHRRPNet(nn.Module):
                  use_dynamic_graph=True, use_meta_attention=True,
                  alpha=0.65, num_heads=4, dropout=0.1):
         super(MetaHRRPNet, self).__init__()
-        self.feature_dim = feature_dim
+        self.feature_dim = feature_dim  # Keep as default but we'll adapt if needed
         self.hidden_dim = hidden_dim
         self.use_dynamic_graph = use_dynamic_graph
         self.use_meta_attention = use_meta_attention
@@ -46,26 +46,68 @@ class MetaHRRPNet(nn.Module):
             from models.baseline_gcn import GraphConvLayer
             self.graph_conv = GraphConvLayer(16, 32)
 
-        # 元注意力机制
-        if use_meta_attention:
-            self.attention = nn.Sequential(
-                nn.Linear(feature_dim, hidden_dim),
-                nn.Tanh(),
-                nn.Linear(hidden_dim, 1)
-            )
-        else:
-            self.attention = nn.Linear(feature_dim, 1)
+        # 初始化attention为None，将在前向传播时第一次根据实际输入尺寸进行创建
+        self.attention = None
+        self.use_meta_attention = use_meta_attention
 
-        # 分类器
-        self.classifier = nn.Sequential(
-            nn.Linear(feature_dim, hidden_dim),
+        # 分类器 - 最后一层也将延迟初始化
+        self.classifier_layers = nn.Sequential(
             nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, num_classes)
+            nn.Dropout(dropout)
         )
+        self.final_layer = None
+        self.num_classes = num_classes
 
         # 初始化
-        self._init_weights()
+        self._init_non_lazy_weights()
+
+    def _init_non_lazy_weights(self):
+        """初始化非延迟加载的模型权重"""
+        for m in [self.conv1, self.bn1]:
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+    def _apply_attention(self, x):
+        """应用注意力机制，如果需要则进行延迟初始化"""
+        actual_feature_dim = x.size(2)  # Get actual feature dimension
+
+        # 首次调用时创建注意力层
+        if self.attention is None:
+            if self.use_meta_attention:
+                self.attention = nn.Sequential(
+                    nn.Linear(actual_feature_dim, self.hidden_dim),
+                    nn.Tanh(),
+                    nn.Linear(self.hidden_dim, 1)
+                )
+            else:
+                self.attention = nn.Linear(actual_feature_dim, 1)
+
+            # 初始化权重
+            for layer in self.attention.modules():
+                if isinstance(layer, nn.Linear):
+                    nn.init.xavier_uniform_(layer.weight)
+                    if layer.bias is not None:
+                        nn.init.zeros_(layer.bias)
+
+        # 同样，需要创建最终分类层
+        if self.final_layer is None:
+            self.final_layer = nn.Linear(actual_feature_dim, self.num_classes)
+            nn.init.xavier_uniform_(self.final_layer.weight)
+            nn.init.zeros_(self.final_layer.bias)
+
+        if self.use_meta_attention:
+            # 更复杂的元注意力
+            attention_logits = self.attention(x).transpose(1, 2)
+            attention_weights = F.softmax(attention_logits, dim=1)
+        else:
+            # 原始注意力
+            attention_weights = F.softmax(self.attention(x), dim=1)
+        return attention_weights
 
     def _init_weights(self):
         """初始化模型权重"""
@@ -104,8 +146,9 @@ class MetaHRRPNet(nn.Module):
         attention_weights = self._apply_attention(x)
         x = torch.sum(x * attention_weights, dim=1)
 
-        # 分类
-        logits = self.classifier(x)
+        # 在分类时，使用延迟初始化的最终层
+        logits = self.classifier_layers(x)
+        logits = self.final_layer(logits)
 
         return logits, adj_matrix
 

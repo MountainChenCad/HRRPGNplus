@@ -73,9 +73,33 @@ class DynamicGraphAttention(nn.Module):
         # 计算注意力得分
         attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
 
-        # 应用距离衰减矩阵（如果提供）
+        # To this:
         if distance_matrix is not None:
-            # 使用可学习的衰减系数alpha调整距离影响
+            # Get the current sequence length
+            current_seq_len = attn_weights.size(-1)
+
+            # Handle size mismatch between distance matrix and actual sequence length
+            if distance_matrix.size(0) != current_seq_len:
+                # Resize distance matrix to match sequence length
+                if distance_matrix.size(0) > current_seq_len:
+                    # Take subset if original is larger
+                    distance_matrix = distance_matrix[:current_seq_len, :current_seq_len]
+                else:
+                    # Interpolate if original is smaller
+                    device = distance_matrix.device
+                    new_distance_matrix = torch.zeros(current_seq_len, current_seq_len, device=device)
+                    scale_factor = current_seq_len / distance_matrix.size(0)
+
+                    for i in range(current_seq_len):
+                        for j in range(current_seq_len):
+                            # Map to original matrix indices
+                            orig_i = min(int(i / scale_factor), distance_matrix.size(0) - 1)
+                            orig_j = min(int(j / scale_factor), distance_matrix.size(0) - 1)
+                            new_distance_matrix[i, j] = distance_matrix[orig_i, orig_j]
+
+                    distance_matrix = new_distance_matrix
+
+            # Apply distance influence
             distance_influence = 1.0 / (self.alpha * distance_matrix + 1.0)
             distance_influence = distance_influence.unsqueeze(0).unsqueeze(1)
             attn_weights = attn_weights * distance_influence

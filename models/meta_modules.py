@@ -138,7 +138,7 @@ class MetaSequential(nn.Sequential, MetaModule):
         return x
 
 
-class MetaGraphConv(nn.Module, MetaModule):
+class MetaGraphConv(MetaModule):
     """元图卷积层"""
 
     def __init__(self, in_channels, out_channels):

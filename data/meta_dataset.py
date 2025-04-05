@@ -140,6 +140,32 @@ class MetaHRRPDataset(Dataset):
         )
         self.task_augment = task_augment
 
+    # Forward all necessary attributes to the base dataset
+    @property
+    def classes(self):
+        return self.dataset.classes
+
+    @property
+    def samples_by_class(self):
+        return self.dataset.samples_by_class
+
+    @property
+    def class_to_idx(self):
+        return self.dataset.class_to_idx
+
+    @property
+    def root_dir(self):
+        return self.dataset.root_dir
+
+    def get_class_count(self):
+        return self.dataset.get_class_count()
+
+    def get_sample_by_class(self, class_idx, sample_idx=None):
+        return self.dataset.get_sample_by_class(class_idx, sample_idx)
+
+    def extract_target_name(self, file_name):
+        return self.dataset.extract_target_name(file_name)
+
     def __len__(self):
         return self.sampler.num_tasks
 
@@ -255,7 +281,11 @@ class CurriculumTaskSampler(TaskSampler):
             else:
                 difficulty = intra_dist
 
-            difficulties.append(difficulty.item())
+            # To this:
+            if isinstance(difficulty, torch.Tensor):
+                difficulties.append(difficulty.item())
+            else:
+                difficulties.append(float(difficulty))
 
         return np.array(difficulties)
 
