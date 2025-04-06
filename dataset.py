@@ -108,11 +108,13 @@ class HRRPDataset(Dataset):
             elif len(magnitude) > 500:
                 magnitude = magnitude[:500]
 
-            # 数据规范化 - 减均值除标准差
-            if np.std(magnitude) > 1e-8:
-                magnitude = (magnitude - np.mean(magnitude)) / np.std(magnitude)
+            # 数据规范化 - 最小-最大缩放
+            min_val = np.min(magnitude)
+            max_val = np.max(magnitude)
+            if max_val > min_val:  # Avoid division by zero
+                magnitude = (magnitude - min_val) / (max_val - min_val)
             else:
-                magnitude = magnitude - np.mean(magnitude)  # 如果标准差近似为0
+                magnitude = np.zeros_like(magnitude)  # If all values are the same
 
             # 转换为张量并添加通道维度
             data = torch.tensor(magnitude, dtype=torch.float32).unsqueeze(0)
@@ -224,7 +226,7 @@ class TaskGenerator:
         query_y = torch.tensor(query_y, dtype=torch.long)
 
         # 打印维度用于调试
-        print(f"任务形状: support_x {support_x.shape}, query_x {query_x.shape}")
+        # print(f"任务形状: support_x {support_x.shape}, query_x {query_x.shape}")
 
         return support_x, support_y, query_x, query_y
 

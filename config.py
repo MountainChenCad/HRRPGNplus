@@ -20,7 +20,7 @@ class Config:
 
     # 小样本学习配置
     n_way = 3  # N-way分类
-    k_shot = 5  # K-shot (支持集每类样本数)
+    k_shot = 10  # K-shot (支持集每类样本数)
     q_query = 15  # 查询集每类样本数
     num_tasks = 600  # 测试任务数量
 
@@ -63,28 +63,28 @@ class Config:
 
     # 动态图配置
     lambda_mix = 0.3  # 静态和动态图混合比例
-    use_dynamic_graph = True  # 是否使用动态图
+    use_dynamic_graph = False  # 是否使用动态图
 
     # MAML配置
-    inner_lr = 0.01  # 内循环学习率α
-    outer_lr = 0.001  # 外循环学习率β
+    inner_lr = 0.005  # Reduce from 0.01
+    outer_lr = 0.0005  # Reduce from 0.001
     inner_steps = 5  # 内循环更新步数
     task_batch_size = 4  # 每批次任务数
     max_epochs = 300  # 最大迭代轮次
-    patience = 10  # 早停耐心值
+    patience = 100  # 早停耐心值
 
     # 优化器配置
     weight_decay = 0.01  # L2正则化系数
 
     # 数据增强配置
-    augmentation = True
+    augmentation = False
     noise_levels = [20, 15, 10, 5, 0]  # SNR in dB
     occlusion_ratio = 0.1  # 随机遮挡比例
     phase_jitter = 0.1  # 相位抖动幅度
 
     # 消融实验配置
     ablation = {
-        'dynamic_graph': True,
+        'dynamic_graph': False,
         'maml': True,
         'lambda_values': [0, 0.25, 0.5, 0.75, 1.0],
         'inner_steps_values': [1, 3, 5, 10],

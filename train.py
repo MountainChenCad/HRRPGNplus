@@ -12,7 +12,7 @@ from utils import prepare_static_adjacency, compute_metrics, log_metrics, save_m
 
 
 class MAMLTrainer:
-    """简化的MAML训练器，使用标准优化器"""
+    """Simplified trainer that maintains gradient flow"""
 
     def __init__(self, model, device):
         self.model = model.to(device)
@@ -59,70 +59,137 @@ class MAMLTrainer:
         return updated_model
 
     def outer_step(self, tasks, train=True):
-        """外循环步骤"""
+        """Outer loop step with direct training on support set"""
         outer_loss = 0.0
         accuracies = []
 
         for task_idx, task in enumerate(tasks):
             support_x, support_y, query_x, query_y = [t.to(self.device) for t in task]
 
-            # 内循环更新
-            updated_model = self.inner_loop(support_x, support_y)
+            if train:
+                # Direct training on support set
+                batch_size, channels, seq_len = support_x.shape
+                static_adj = prepare_static_adjacency(batch_size, seq_len, self.device)
 
-            # 在查询集上评估
-            batch_size, channels, seq_len = query_x.shape
-            static_adj = prepare_static_adjacency(batch_size, seq_len, self.device)
+                self.meta_optimizer.zero_grad()
+                logits, _ = self.model(support_x, static_adj)
+                loss = self.criterion(logits, support_y)
+                loss.backward()
+                self.meta_optimizer.step()
 
-            with torch.enable_grad() if train else torch.no_grad():
-                logits, _ = updated_model(query_x, static_adj)
-                task_loss = self.criterion(logits, query_y)
+                # Evaluate on query set (no gradient)
+                with torch.no_grad():
+                    batch_size, channels, seq_len = query_x.shape
+                    static_adj = prepare_static_adjacency(batch_size, seq_len, self.device)
+                    logits, _ = self.model(query_x, static_adj)
+                    accuracy = (torch.argmax(logits, dim=1) == query_y).float().mean().item()
+                    accuracies.append(accuracy)
+            else:
+                # For evaluation, keep inner loop adaptation
+                updated_model = self.inner_loop(support_x, support_y)
 
-                if train:
-                    # 梯度优化 - 外循环
-                    self.meta_optimizer.zero_grad()
-                    task_loss.backward()
-                    self.meta_optimizer.step()
+                with torch.no_grad():
+                    batch_size, channels, seq_len = query_x.shape
+                    static_adj = prepare_static_adjacency(batch_size, seq_len, self.device)
+                    logits, _ = updated_model(query_x, static_adj)
+                    task_loss = self.criterion(logits, query_y)
+                    outer_loss += task_loss.item()
 
-                # 计算准确率
-                pred = torch.argmax(logits, dim=1)
-                accuracy = (pred == query_y).float().mean().item()
-                outer_loss += task_loss.item()
-                accuracies.append(accuracy)
+                    pred = torch.argmax(logits, dim=1)
+                    accuracy = (pred == query_y).float().mean().item()
+                    accuracies.append(accuracy)
 
-        # 平均所有任务的损失和准确率
-        return outer_loss / len(tasks), np.mean(accuracies) * 100
+        return outer_loss / len(tasks) if not train else 0.0, np.mean(accuracies) * 100
 
     def train_epoch(self, task_generator, num_tasks=None):
-        """训练一个epoch"""
+        """Train for one epoch"""
         self.model.train()
         num_tasks = num_tasks or Config.task_batch_size
         tasks = []
 
-        # 生成任务批次
+        # Generate task batch
         for _ in range(num_tasks):
             support_x, support_y, query_x, query_y = task_generator.generate_task()
             tasks.append((support_x, support_y, query_x, query_y))
 
-        # 执行外循环更新
-        loss, accuracy = self.outer_step(tasks, train=True)
+        # Training loop
+        total_loss = 0
+        total_accuracy = 0
 
-        return loss, accuracy
+        for task_idx, (support_x, support_y, query_x, query_y) in enumerate(tasks):
+            # Move to device
+            support_x, support_y = support_x.to(self.device), support_y.to(self.device)
+            query_x, query_y = query_x.to(self.device), query_y.to(self.device)
+
+            # Forward pass on support set
+            self.meta_optimizer.zero_grad()
+
+            # Process support set
+            support_batch_size, channels, seq_len = support_x.shape
+            support_static_adj = prepare_static_adjacency(support_batch_size, seq_len, self.device)
+
+            # Train directly on support set
+            support_logits, _ = self.model(support_x, support_static_adj)
+            support_loss = self.criterion(support_logits, support_y)
+
+            # Process query set to measure performance
+            query_batch_size, _, seq_len = query_x.shape
+            query_static_adj = prepare_static_adjacency(query_batch_size, seq_len, self.device)
+
+            query_logits, _ = self.model(query_x, query_static_adj)
+            query_loss = self.criterion(query_logits, query_y)
+
+            # Combined loss with emphasis on query performance
+            loss = 0.3 * support_loss + 0.7 * query_loss
+
+            # Backward and optimize
+            loss.backward()
+            self.meta_optimizer.step()
+
+            # Calculate accuracy
+            pred = torch.argmax(query_logits, dim=1)
+            accuracy = (pred == query_y).float().mean().item()
+
+            total_loss += loss.item()
+            total_accuracy += accuracy
+
+        return total_loss / num_tasks, (total_accuracy / num_tasks) * 100
 
     def validate(self, task_generator, num_tasks=100):
-        """验证模型"""
+        """Validate model"""
         self.model.eval()
         tasks = []
 
-        # 生成验证任务
+        # Generate validation tasks
         for _ in range(num_tasks):
             support_x, support_y, query_x, query_y = task_generator.generate_task()
             tasks.append((support_x, support_y, query_x, query_y))
 
-        # 在验证任务上评估
-        with torch.no_grad():
-            loss, accuracy = self.outer_step(tasks, train=False)
+        # Evaluation loop
+        total_loss = 0
+        total_accuracy = 0
 
-        return loss, accuracy
+        with torch.no_grad():
+            for support_x, support_y, query_x, query_y in tasks:
+                # Move to device
+                support_x, support_y = support_x.to(self.device), support_y.to(self.device)
+                query_x, query_y = query_x.to(self.device), query_y.to(self.device)
+
+                # Process query set
+                batch_size, _, seq_len = query_x.shape
+                static_adj = prepare_static_adjacency(batch_size, seq_len, self.device)
+
+                logits, _ = self.model(query_x, static_adj)
+                loss = self.criterion(logits, query_y)
+
+                # Calculate accuracy
+                pred = torch.argmax(logits, dim=1)
+                accuracy = (pred == query_y).float().mean().item()
+
+                total_loss += loss.item()
+                total_accuracy += accuracy
+
+        return total_loss / num_tasks, (total_accuracy / num_tasks) * 100
 
     def train(self, train_task_generator, val_task_generator, num_epochs=None):
         """完整训练流程"""
@@ -175,10 +242,10 @@ class MAMLTrainer:
 
 
 def test_model(model, test_task_generator, device, num_tasks=None, shot=None):
-    """测试模型在新类上的性能"""
+    """Test model with fine-tuning on each task"""
     num_tasks = num_tasks or Config.num_tasks
 
-    # 保存原始k_shot并设置新值
+    # Save original k_shot and set new value if specified
     original_k_shot = test_task_generator.k_shot
     if shot is not None:
         test_task_generator.k_shot = shot
@@ -193,45 +260,41 @@ def test_model(model, test_task_generator, device, num_tasks=None, shot=None):
             support_x, support_y = support_x.to(device), support_y.to(device)
             query_x, query_y = query_x.to(device), query_y.to(device)
 
-            # 克隆模型
-            updated_model = copy.deepcopy(model)
-            updated_model.train()
+            # Fine-tune a copy of the model on the support set
+            adapted_model = copy.deepcopy(model)
+            adapted_model.train()
 
-            # 创建优化器
-            inner_optimizer = torch.optim.SGD(
-                updated_model.parameters(),
-                lr=Config.inner_lr
-            )
+            optimizer = torch.optim.SGD(adapted_model.parameters(), lr=Config.inner_lr)
+            criterion = nn.CrossEntropyLoss()
 
             batch_size, channels, seq_len = support_x.shape
             static_adj = prepare_static_adjacency(batch_size, seq_len, device)
 
-            # 内循环适应
+            # Fine-tuning steps
             for _ in range(Config.inner_steps):
-                inner_optimizer.zero_grad()
-                logits, _ = updated_model(support_x, static_adj)
-                loss = nn.CrossEntropyLoss()(logits, support_y)
+                optimizer.zero_grad()
+                logits, _ = adapted_model(support_x, static_adj)
+                loss = criterion(logits, support_y)
                 loss.backward()
-                inner_optimizer.step()
+                optimizer.step()
 
-            # 在查询集上评估
-            updated_model.eval()
+            # Evaluate on query set
+            adapted_model.eval()
             batch_size, channels, seq_len = query_x.shape
             static_adj = prepare_static_adjacency(batch_size, seq_len, device)
 
             with torch.no_grad():
-                logits, _ = updated_model(query_x, static_adj)
+                logits, _ = adapted_model(query_x, static_adj)
                 pred = torch.argmax(logits, dim=1)
-
                 accuracy = (pred == query_y).float().mean().item()
                 all_accuracies.append(accuracy)
                 total_accuracy += accuracy
 
         except Exception as e:
-            print(f"测试任务 {task_idx} 出错: {e}")
+            print(f"Testing task {task_idx} error: {e}")
             continue
 
-    # 恢复原始k_shot
+    # Restore original k_shot
     if shot is not None:
         test_task_generator.k_shot = original_k_shot
 
