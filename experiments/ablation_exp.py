@@ -52,6 +52,9 @@ class AblationExperiment:
         # 记录配置
         self.logger.info(f"实验配置: {config.get_config_dict()}")
 
+        # 创建距离矩阵
+        self.distance_matrix = self._generate_distance_matrix(config.FEATURE_DIM).to(config.DEVICE)
+
         # 定义消融组
         if hasattr(config, 'ABLATION_GROUPS'):
             self.ablation_groups = config.ABLATION_GROUPS
@@ -91,6 +94,21 @@ class AblationExperiment:
             }
 
         self.logger.info(f"将进行以下消融组实验: {list(self.ablation_groups.keys())}")
+
+    def _generate_distance_matrix(self, N):
+        """生成距离矩阵"""
+        distance_matrix = torch.zeros(N, N, dtype=torch.float32)
+        for i in range(N):
+            for j in range(N):
+                distance_matrix[i, j] = 1 / (abs(i - j) + 1)
+
+        # 应用min-max归一化
+        min_val = distance_matrix.min()
+        max_val = distance_matrix.max()
+        if max_val > min_val:
+            distance_matrix = (distance_matrix - min_val) / (max_val - min_val)
+
+        return distance_matrix
 
     def _setup_logger(self):
         """设置日志记录器"""

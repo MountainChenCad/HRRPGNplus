@@ -20,7 +20,23 @@ class MetaModule(nn.Module):
 
     def clone_parameters(self):
         """深拷贝模型参数并返回"""
-        return {name: param.clone() for name, param in self.named_parameters()}
+        return OrderedDict({name: param.clone() for name, param in self.named_parameters()})
+
+    def clone_with_weights(self, weights_dict):
+        """
+        创建一个带有指定权重的模型副本
+
+        参数:
+        - weights_dict: 权重字典
+
+        返回:
+        - 带有新权重的模型副本
+        """
+        clone = deepcopy(self)
+        for name, param in clone.named_parameters():
+            if name in weights_dict:
+                param.data = weights_dict[name].data.to(param.device)
+        return clone
 
     def point_grad_to(self, target):
         """
@@ -60,6 +76,17 @@ class MetaModule(nn.Module):
                 updated_params[name] = param - lr * grads[name]
 
         return updated_params
+
+    def transfer_weights(self, weights_dict):
+        """
+        将指定的权重转移到当前模型
+
+        参数:
+        - weights_dict: 权重字典
+        """
+        for name, param in self.named_parameters():
+            if name in weights_dict:
+                param.data = weights_dict[name].data.to(param.device)
 
 
 class MetaConv1d(nn.Conv1d, MetaModule):
@@ -104,6 +131,11 @@ class MetaBatchNorm1d(nn.BatchNorm1d, MetaModule):
     def __init__(self, *args, **kwargs):
         super(MetaBatchNorm1d, self).__init__(*args, **kwargs)
 
+        # Buffers need special handling for meta-learning
+        self.register_buffer('running_mean', torch.zeros(self.num_features))
+        self.register_buffer('running_var', torch.ones(self.num_features))
+        self.register_buffer('num_batches_tracked', torch.tensor(0, dtype=torch.long))
+
     def forward(self, x, params=None):
         if params is None:
             params = {k: v for k, v in self.named_parameters()}
@@ -111,10 +143,23 @@ class MetaBatchNorm1d(nn.BatchNorm1d, MetaModule):
         weight = params.get('weight', self.weight)
         bias = params.get('bias', self.bias)
 
-        return F.batch_norm(
-            x, self.running_mean, self.running_var, weight, bias,
-            self.training, self.momentum, self.eps
-        )
+        if self.training:
+            # During training, calculate stats but use the provided ones
+            _, running_var, running_mean = torch.var_mean(
+                x, dim=[0, 2], unbiased=False, keepdim=True
+            )
+            # Update running stats for evaluation mode
+            self.running_mean = self.running_mean * (1 - self.momentum) + running_mean.reshape(-1) * self.momentum
+            self.running_var = self.running_var * (1 - self.momentum) + running_var.reshape(-1) * self.momentum
+            self.num_batches_tracked += 1
+            # Normalize with current batch stats
+            norm_x = (x - running_mean) / torch.sqrt(running_var + self.eps)
+        else:
+            # In eval mode, use running stats
+            norm_x = (x - self.running_mean.view(1, -1, 1)) / torch.sqrt(self.running_var.view(1, -1, 1) + self.eps)
+
+        # Apply gamma and beta
+        return weight.view(1, -1, 1) * norm_x + bias.view(1, -1, 1)
 
 
 class MetaSequential(nn.Sequential, MetaModule):
@@ -195,37 +240,78 @@ class MAML(nn.Module):
         - distance_matrix: 距离矩阵（如有）
 
         返回:
-        - 查询集预测结果
+        - query_logits: 查询集预测结果
+        - adj_matrix: 邻接矩阵
         """
+        device = support_x.device
+
         # 克隆初始参数
-        theta = {name: param.clone() for name, param in self.model.named_parameters()}
+        original_params = {name: param.clone() for name, param in self.model.named_parameters()}
 
         # 内循环适应
         for _ in range(self.inner_steps):
-            logits, _ = self.model(support_x, distance_matrix)
+            # 前向传播
+            logits, adj_matrix = self.model(support_x, distance_matrix)
             loss = F.cross_entropy(logits, support_y)
 
             # 计算梯度
-            grads = torch.autograd.grad(loss, self.model.parameters(),
-                                        create_graph=not self.first_order)
+            grads = torch.autograd.grad(
+                loss,
+                self.model.parameters(),
+                create_graph=not self.first_order,
+                retain_graph=not self.first_order
+            )
 
             # 更新参数
-            updated_params = {}
             for (name, param), grad in zip(self.model.named_parameters(), grads):
-                updated_params[name] = param - self.inner_lr * grad
-
-            # 更新模型参数
-            for name, param in self.model.named_parameters():
-                param.data = updated_params[name].data
+                param.data = param.data - self.inner_lr * grad
 
         # 在查询集上预测
         query_logits, adj_matrix = self.model(query_x, distance_matrix)
 
         # 重置模型参数
         for name, param in self.model.named_parameters():
-            param.data = theta[name].data
+            param.data = original_params[name].data
 
         return query_logits, adj_matrix
+
+    def adapt(self, support_x, support_y, distance_matrix=None, steps=None):
+        """
+        适应新任务
+
+        参数:
+        - support_x: 支持集输入
+        - support_y: 支持集标签
+        - distance_matrix: 距离矩阵（如有）
+        - steps: 适应步数，默认使用self.inner_steps
+
+        返回:
+        - adapted_model: 适应后的模型
+        """
+        if steps is None:
+            steps = self.inner_steps
+
+        adapted_model = deepcopy(self.model)
+
+        # 内循环适应
+        for _ in range(steps):
+            # 前向传播
+            logits, _ = adapted_model(support_x, distance_matrix)
+            loss = F.cross_entropy(logits, support_y)
+
+            # 计算梯度
+            grads = torch.autograd.grad(
+                loss,
+                adapted_model.parameters(),
+                create_graph=False,
+                retain_graph=False
+            )
+
+            # 更新参数
+            for (name, param), grad in zip(adapted_model.named_parameters(), grads):
+                param.data = param.data - self.inner_lr * grad
+
+        return adapted_model
 
 
 class ProtoLoss(nn.Module):
@@ -255,14 +341,23 @@ class ProtoLoss(nn.Module):
         返回:
         - 原型损失值
         """
+        # 确保输入在正确设备上
+        device = embeddings.device
+
         # 计算原型（类别中心）
         classes = torch.unique(labels)
         n_classes = len(classes)
-        prototypes = torch.zeros(n_classes, embeddings.size(1), device=embeddings.device)
+
+        if n_classes <= 1:
+            # 如果只有一个类别，则无法计算对比损失
+            return torch.tensor(0.0, device=device)
+
+        prototypes = torch.zeros(n_classes, embeddings.size(1), device=device)
 
         for i, c in enumerate(classes):
             mask = (labels == c)
-            prototypes[i] = embeddings[mask].mean(dim=0)
+            if mask.sum() > 0:  # Ensure we have samples for this class
+                prototypes[i] = embeddings[mask].mean(dim=0)
 
         # 计算每个样本到各原型的距离
         if self.metric == 'euclidean':
@@ -279,4 +374,10 @@ class ProtoLoss(nn.Module):
 
         # 计算交叉熵损失
         logits = -distances
-        return F.cross_entropy(logits, labels)
+
+        # 确保标签在有效范围内
+        label_indices = torch.zeros_like(labels)
+        for i, c in enumerate(classes):
+            label_indices[labels == c] = i
+
+        return F.cross_entropy(logits, label_indices)

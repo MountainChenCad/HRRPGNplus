@@ -56,6 +56,24 @@ class NoiseExperiment:
         self.logger.info(f"噪声类型: {self.noise_types}")
         self.logger.info(f"信噪比(dB): {self.snr_levels}")
 
+        # 创建距离矩阵
+        self.distance_matrix = self._generate_distance_matrix(config.FEATURE_DIM).to(config.DEVICE)
+
+    def _generate_distance_matrix(self, N):
+        """生成距离矩阵"""
+        distance_matrix = torch.zeros(N, N, dtype=torch.float32)
+        for i in range(N):
+            for j in range(N):
+                distance_matrix[i, j] = 1 / (abs(i - j) + 1)
+
+        # 应用min-max归一化
+        min_val = distance_matrix.min()
+        max_val = distance_matrix.max()
+        if max_val > min_val:
+            distance_matrix = (distance_matrix - min_val) / (max_val - min_val)
+
+        return distance_matrix
+
     def _setup_logger(self):
         """设置日志记录器"""
         log_file = os.path.join(self.result_dir, 'noise_exp.log')
@@ -157,13 +175,10 @@ class NoiseExperiment:
         meta_model.load_state_dict(meta_checkpoint['model_state_dict'])
         meta_model.eval()
 
-        # 生成距离矩阵
-        distance_matrix = self._generate_distance_matrix(self.config.FEATURE_DIM).to(self.config.DEVICE)
-
         # 在干净数据上测试基准性能
         self.logger.info("测试干净数据上的性能...")
-        clean_standard_acc = self._evaluate_standard_model(standard_model, self.test_dataset, distance_matrix)
-        clean_meta_acc = self._evaluate_meta_model(meta_model, self.test_dataset, distance_matrix)
+        clean_standard_acc = self._evaluate_standard_model(standard_model, self.test_dataset)
+        clean_meta_acc = self._evaluate_meta_model(meta_model, self.test_dataset)
 
         self.logger.info(f"干净数据上的性能 - 标准模型: {clean_standard_acc:.2f}%, 元学习模型: {clean_meta_acc:.2f}%")
 
@@ -176,12 +191,12 @@ class NoiseExperiment:
                 noisy_test_dataset = self._create_noisy_dataset(self.test_dataset, noise_type, snr)
 
                 # 测试标准模型
-                standard_acc = self._evaluate_standard_model(standard_model, noisy_test_dataset, distance_matrix)
+                standard_acc = self._evaluate_standard_model(standard_model, noisy_test_dataset)
                 # 计算鲁棒性比例
                 standard_robustness = (standard_acc / clean_standard_acc) * 100
 
                 # 测试元学习模型
-                meta_acc = self._evaluate_meta_model(meta_model, noisy_test_dataset, distance_matrix)
+                meta_acc = self._evaluate_meta_model(meta_model, noisy_test_dataset)
                 # 计算鲁棒性比例
                 meta_robustness = (meta_acc / clean_meta_acc) * 100
 
@@ -214,14 +229,6 @@ class NoiseExperiment:
         self.logger.info(f"噪声实验完成，结果已保存至 {save_path}")
 
         return results
-
-    def _generate_distance_matrix(self, N):
-        """生成距离矩阵"""
-        distance_matrix = torch.zeros(N, N, dtype=torch.float32)
-        for i in range(N):
-            for j in range(N):
-                distance_matrix[i, j] = 1 / (abs(i - j) + 1)
-        return distance_matrix
 
     def _train_models(self):
         """训练标准模型和元学习模型"""
@@ -284,7 +291,7 @@ class NoiseExperiment:
 
         meta_trainer.train()
 
-    def _evaluate_standard_model(self, model, dataset, distance_matrix):
+    def _evaluate_standard_model(self, model, dataset):
         """评估标准模型性能"""
         model.eval()
         dataloader = torch.utils.data.DataLoader(
@@ -301,8 +308,8 @@ class NoiseExperiment:
             for data, targets in dataloader:
                 data, targets = data.to(self.config.DEVICE), targets.to(self.config.DEVICE)
 
-                # 前向传播
-                outputs = model(data, distance_matrix)
+                # 前向传播 - 处理返回的元组
+                outputs, _ = model(data, self.distance_matrix)
 
                 # 统计准确率
                 _, predicted = outputs.max(1)
@@ -312,7 +319,7 @@ class NoiseExperiment:
         accuracy = 100.0 * correct / total
         return accuracy
 
-    def _evaluate_meta_model(self, model, dataset, distance_matrix):
+    def _evaluate_meta_model(self, model, dataset):
         """评估元学习模型性能"""
         model.eval()
 
@@ -343,13 +350,15 @@ class NoiseExperiment:
                 query_x = task_batch['query_x'][0].to(self.config.DEVICE)
                 query_y = task_batch['query_y'][0].to(self.config.DEVICE)
 
+                # 临时保存原始参数
+                original_params = {}
+                for name, param in model.named_parameters():
+                    original_params[name] = param.data.clone()
+
                 # 快速适应
                 for step in range(self.config.INNER_STEPS):
-                    if hasattr(model, 'use_dynamic_graph') and model.use_dynamic_graph:
-                        logits, _ = model(support_x, distance_matrix)
-                    else:
-                        logits = model(support_x, distance_matrix)
-
+                    # 处理返回的元组
+                    logits, _ = model(support_x, self.distance_matrix)
                     loss = torch.nn.functional.cross_entropy(logits, support_y)
 
                     # 计算梯度
@@ -360,14 +369,12 @@ class NoiseExperiment:
                     )
 
                     # 更新权重
-                    for param, grad in zip(model.parameters(), grads):
+                    for (name, param), grad in zip(model.named_parameters(), grads):
                         param.data = param.data - self.config.INNER_LR * grad
 
                 # 在查询集上评估
-                if hasattr(model, 'use_dynamic_graph') and model.use_dynamic_graph:
-                    query_logits, _ = model(query_x, distance_matrix)
-                else:
-                    query_logits = model(query_x, distance_matrix)
+                # 处理返回的元组
+                query_logits, _ = model(query_x, self.distance_matrix)
 
                 # 计算准确率
                 _, predicted = query_logits.max(1)
@@ -375,8 +382,8 @@ class NoiseExperiment:
                 all_accuracies.append(accuracy)
 
                 # 恢复原始模型参数
-                model.load_state_dict(torch.load(os.path.join(self.config.SAVE_DIR, "best_meta_model.pth"),
-                                                 map_location=self.config.DEVICE)['model_state_dict'])
+                for name, param in model.named_parameters():
+                    param.data = original_params[name]
 
         avg_accuracy = np.mean(all_accuracies)
         return avg_accuracy

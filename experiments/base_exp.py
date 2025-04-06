@@ -57,6 +57,24 @@ class BaseExperiment:
                          f"验证集 {len(self.val_dataset)} 样本, "
                          f"测试集 {len(self.test_dataset)} 样本")
 
+        # 创建距离矩阵
+        self.distance_matrix = self._generate_distance_matrix(config.FEATURE_DIM).to(config.DEVICE)
+
+    def _generate_distance_matrix(self, N):
+        """生成距离矩阵"""
+        distance_matrix = torch.zeros(N, N, dtype=torch.float32)
+        for i in range(N):
+            for j in range(N):
+                distance_matrix[i, j] = 1 / (abs(i - j) + 1)
+
+        # 应用min-max归一化
+        min_val = distance_matrix.min()
+        max_val = distance_matrix.max()
+        if max_val > min_val:
+            distance_matrix = (distance_matrix - min_val) / (max_val - min_val)
+
+        return distance_matrix
+
     def _setup_logger(self):
         """设置日志记录器"""
         log_file = os.path.join(self.result_dir, 'experiment.log')
@@ -87,8 +105,8 @@ class BaseExperiment:
         """加载数据集"""
         # 加载训练、验证和测试数据集
         train_dir = os.path.join(self.data_root, 'train')
-        val_dir = os.path.join(self.data_root, 'val')
-        test_dir = os.path.join(self.data_root, 'test')
+        val_dir = os.path.join(self.data_root, 'val_fewshots')
+        test_dir = os.path.join(self.data_root, 'test_fewshots')
 
         train_dataset = HRRPDataset(train_dir)
         val_dataset = HRRPDataset(val_dir)

@@ -139,11 +139,6 @@ class MAMLTrainer:
         task_losses = []
         task_accuracies = []
 
-        # # Print input shapes and target info for debugging
-        # print(f"Support X shape: {support_x.shape}, Support Y shape: {support_y.shape}")
-        # print(f"Support Y values: min={support_y.min().item()}, max={support_y.max().item()}")
-        # print(f"Number of classes in model: {self.model.num_classes}")
-
         # Validate target values
         if support_y.max() >= self.model.num_classes:
             raise ValueError(
@@ -158,14 +153,8 @@ class MAMLTrainer:
 
         # 内循环适应
         for step in range(inner_steps):
-            # 前向传播
-            if hasattr(self.model, 'use_dynamic_graph') and self.model.use_dynamic_graph:
-                logits, _ = self.model(support_x, self.distance_matrix)
-            else:
-                logits = self.model(support_x, self.distance_matrix)
-
-            # Validate output
-            # print(f"Logits shape: {logits.shape}, Target shape: {support_y.shape}")
+            # 前向传播 - 处理(logits, adj_matrix)返回值
+            logits, _ = self.model(support_x, self.distance_matrix)
 
             # 计算损失
             loss = F.cross_entropy(logits, support_y)
@@ -174,7 +163,8 @@ class MAMLTrainer:
             grads = torch.autograd.grad(
                 loss,
                 [p for p in self.model.parameters() if p.requires_grad],
-                create_graph=not self.config.FIRST_ORDER
+                create_graph=not self.config.FIRST_ORDER,
+                retain_graph=not self.config.FIRST_ORDER
             )
 
             # 更新权重
@@ -187,11 +177,8 @@ class MAMLTrainer:
                 if param.requires_grad:
                     param.data = fast_weights[name]
 
-        # 在查询集上评估适应后的模型
-        if hasattr(self.model, 'use_dynamic_graph') and self.model.use_dynamic_graph:
-            query_logits, _ = self.model(query_x, self.distance_matrix)
-        else:
-            query_logits = self.model(query_x, self.distance_matrix)
+        # 在查询集上评估适应后的模型 - 处理(logits, adj_matrix)返回值
+        query_logits, _ = self.model(query_x, self.distance_matrix)
 
         query_loss = F.cross_entropy(query_logits, query_y)
         query_acc = self._compute_accuracy(query_logits, query_y)
@@ -336,11 +323,8 @@ class MAMLTrainer:
 
                     # Inner loop adaptation
                     for step in range(self.config.INNER_STEPS):
-                        if hasattr(self.model, 'use_dynamic_graph') and self.model.use_dynamic_graph:
-                            logits, _ = self.model(s_x, self.distance_matrix)
-                        else:
-                            logits = self.model(s_x, self.distance_matrix)
-
+                        # 修改为处理 (logits, adj_matrix) 返回值
+                        logits, _ = self.model(s_x, self.distance_matrix)
                         loss = F.cross_entropy(logits, s_y)
 
                         # Calculate gradients
@@ -357,11 +341,8 @@ class MAMLTrainer:
 
                 # Evaluate on query set - no gradients needed
                 with torch.no_grad():
-                    if hasattr(self.model, 'use_dynamic_graph') and self.model.use_dynamic_graph:
-                        query_logits, _ = self.model(q_x, self.distance_matrix)
-                    else:
-                        query_logits = self.model(q_x, self.distance_matrix)
-
+                    # 修改为处理 (logits, adj_matrix) 返回值
+                    query_logits, _ = self.model(q_x, self.distance_matrix)
                     query_loss = F.cross_entropy(query_logits, q_y)
                     query_acc = self._compute_accuracy(query_logits, q_y)
 
@@ -406,11 +387,8 @@ class MAMLTrainer:
             with torch.enable_grad():
                 # Inner loop adaptation
                 for step in range(self.config.INNER_STEPS):
-                    if hasattr(self.model, 'use_dynamic_graph') and self.model.use_dynamic_graph:
-                        logits, _ = self.model(support_x, self.distance_matrix)
-                    else:
-                        logits = self.model(support_x, self.distance_matrix)
-
+                    # 修改为处理 (logits, adj_matrix) 返回值
+                    logits, _ = self.model(support_x, self.distance_matrix)
                     loss = F.cross_entropy(logits, support_y)
 
                     # Calculate gradients
@@ -427,11 +405,8 @@ class MAMLTrainer:
 
             # Evaluate on query set - no gradients needed
             with torch.no_grad():
-                if hasattr(self.model, 'use_dynamic_graph') and self.model.use_dynamic_graph:
-                    query_logits, _ = self.model(query_x, self.distance_matrix)
-                else:
-                    query_logits = self.model(query_x, self.distance_matrix)
-
+                # 修改为处理 (logits, adj_matrix) 返回值
+                query_logits, _ = self.model(query_x, self.distance_matrix)
                 query_loss = F.cross_entropy(query_logits, query_y)
                 query_acc = self._compute_accuracy(query_logits, query_y)
 

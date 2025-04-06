@@ -90,7 +90,13 @@ class CurriculumScheduler:
         else:
             difficulty = intra_dist
 
-        return difficulty.item()
+        # 确保返回值是一个标量
+        if isinstance(difficulty, torch.Tensor):
+            difficulty = difficulty.item()
+        else:
+            difficulty = float(difficulty)
+
+        return difficulty
 
     def compute_task_difficulty(self, task_id, support_x, support_y, query_x=None, query_y=None):
         """计算任务难度并缓存"""
@@ -161,7 +167,15 @@ class CurriculumScheduler:
         # 对任务按难度分组
         difficulties = list(self.task_difficulties.values())
         if difficulties:
-            q1, q2 = np.percentile(difficulties, [33, 66])
+            # 使用百分位数进行分组
+            if len(difficulties) >= 3:
+                q1, q2 = np.percentile(difficulties, [33, 66])
+            else:
+                # 当样本量太小时使用简单的划分
+                sorted_diffs = sorted(difficulties)
+                n = len(sorted_diffs)
+                q1 = sorted_diffs[max(0, n // 3 - 1)]
+                q2 = sorted_diffs[min(n - 1, 2 * n // 3)]
 
             for task_id, diff in self.task_difficulties.items():
                 if diff <= q1:

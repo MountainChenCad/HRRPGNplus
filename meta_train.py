@@ -143,6 +143,23 @@ def visualize_learning_progress(history, save_dir):
         plt.close()
 
 
+def generate_distance_matrix(N):
+    """生成归一化距离矩阵"""
+    # 创建原始距离矩阵
+    distance_matrix = torch.zeros(N, N, dtype=torch.float32)
+    for i in range(N):
+        for j in range(N):
+            distance_matrix[i, j] = 1 / (abs(i - j) + 1)
+
+    # 应用min-max归一化
+    min_val = distance_matrix.min()
+    max_val = distance_matrix.max()
+    if max_val > min_val:
+        distance_matrix = (distance_matrix - min_val) / (max_val - min_val)
+
+    return distance_matrix
+
+
 def main():
     """主函数"""
     # 解析命令行参数
@@ -201,7 +218,7 @@ def main():
 
     # 加载数据集
     logger.info("加载数据集...")
-    train_dir = os.path.join(args.data_root, 'train_fewshots')
+    train_dir = os.path.join(args.data_root, 'train')
     val_dir = os.path.join(args.data_root, 'val_fewshots')
     test_dir = os.path.join(args.data_root, 'test_fewshots')
 
