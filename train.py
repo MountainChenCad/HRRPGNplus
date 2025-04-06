@@ -142,7 +142,8 @@ class MAMLPlusPlusTrainer:
         # Determine whether to use second-order gradients based on current epoch
         create_graph = Config.use_second_order and self.epoch >= Config.second_order_start_epoch if train else False
 
-        for task_idx, task in enumerate(tasks):
+        # Add progress bar for task processing
+        for task_idx, task in tqdm(enumerate(tasks), total=len(tasks), desc="Processing tasks"):
             support_x, support_y, query_x, query_y = [t.to(self.device) for t in task]
 
             # Inner loop adaptation - returns updated model
@@ -203,8 +204,8 @@ class MAMLPlusPlusTrainer:
         num_tasks = num_tasks or Config.task_batch_size
         tasks = []
 
-        # Generate task batch
-        for _ in range(num_tasks):
+        # Generate task batch with progress bar
+        for _ in tqdm(range(num_tasks), desc="Generating training tasks"):
             support_x, support_y, query_x, query_y = task_generator.generate_task()
             tasks.append((support_x, support_y, query_x, query_y))
 
@@ -217,13 +218,13 @@ class MAMLPlusPlusTrainer:
 
         return meta_loss, meta_accuracy
 
-    def validate(self, task_generator, num_tasks=100):
+    def validate(self, task_generator, num_tasks=10):
         """Validate model with MAML++ approach"""
         self.model.eval()
         tasks = []
 
-        # Generate validation tasks
-        for _ in range(num_tasks):
+        # Generate validation tasks with progress bar
+        for _ in tqdm(range(num_tasks), desc="Generating validation tasks"):
             try:
                 support_x, support_y, query_x, query_y = task_generator.generate_task()
                 tasks.append((support_x, support_y, query_x, query_y))
@@ -251,7 +252,8 @@ class MAMLPlusPlusTrainer:
         val_losses = []
         val_accs = []
 
-        for epoch in range(num_epochs):
+        # Add tqdm progress bar for epochs
+        for epoch in tqdm(range(num_epochs), desc="Training epochs"):
             self.epoch = epoch  # Update current epoch for annealing
 
             # Training phase
@@ -437,7 +439,3 @@ def noise_robustness_experiment(model, test_task_generator, device, noise_levels
     Config.augmentation = original_augmentation
 
     return noise_levels, results
-
-
-# Maintain backward compatibility
-MAMLTrainer = MAMLPlusPlusTrainer

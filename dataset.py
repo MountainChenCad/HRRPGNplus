@@ -108,13 +108,13 @@ class HRRPDataset(Dataset):
             elif len(magnitude) > 500:
                 magnitude = magnitude[:500]
 
-            # 数据规范化 - 最小-最大缩放
-            min_val = np.min(magnitude)
-            max_val = np.max(magnitude)
-            if max_val > min_val:  # Avoid division by zero
-                magnitude = (magnitude - min_val) / (max_val - min_val)
-            else:
-                magnitude = np.zeros_like(magnitude)  # If all values are the same
+            # # 数据规范化 - 最小-最大缩放
+            # min_val = np.min(magnitude)
+            # max_val = np.max(magnitude)
+            # if max_val > min_val:  # Avoid division by zero
+            #     magnitude = (magnitude - min_val) / (max_val - min_val)
+            # else:
+            #     magnitude = np.zeros_like(magnitude)  # If all values are the same
 
             # 转换为张量并添加通道维度
             data = torch.tensor(magnitude, dtype=torch.float32).unsqueeze(0)
