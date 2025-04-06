@@ -112,11 +112,19 @@ class MAMLTrainer:
             raise ValueError(f"不支持的优化器类型: {optim_type}")
 
     def _generate_distance_matrix(self, N):
-        """生成距离矩阵"""
+        """Generate normalized distance matrix"""
+        # Create raw distance matrix
         distance_matrix = torch.zeros(N, N, dtype=torch.float32)
         for i in range(N):
             for j in range(N):
                 distance_matrix[i, j] = 1 / (abs(i - j) + 1)
+
+        # Apply min-max normalization
+        min_val = distance_matrix.min()
+        max_val = distance_matrix.max()
+        if max_val > min_val:
+            distance_matrix = (distance_matrix - min_val) / (max_val - min_val)
+
         return distance_matrix
 
     def _compute_accuracy(self, logits, targets):
@@ -278,6 +286,7 @@ class MAMLTrainer:
 
         # 反向传播和优化
         meta_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=3.0)
         self.meta_optimizer.step()
 
         # 计算平均任务损失和准确率
@@ -287,41 +296,45 @@ class MAMLTrainer:
         return avg_task_loss, avg_task_acc
 
     def meta_validate(self, meta_batch_size=4):
-        """在验证集上评估元学习模型"""
+        """Evaluate the meta-learning model on the validation set"""
         self.model.eval()
 
         all_task_losses = []
         all_task_accs = []
 
-        # 采样验证任务
+        # Sample validation tasks
         for i in range(0, self.config.EVAL_TASKS, meta_batch_size):
-            # 确定当前批次大小
+            # Determine batch size
             curr_batch_size = min(meta_batch_size, self.config.EVAL_TASKS - i)
             if curr_batch_size <= 0:
                 break
 
             task_batch = self.val_sampler.sample(curr_batch_size)
 
-            # 提取支持集和查询集
             support_x = task_batch['support_x']
             support_y = task_batch['support_y']
             query_x = task_batch['query_x']
             query_y = task_batch['query_y']
 
-            # 对每个任务评估
-            with torch.no_grad():
-                for j in range(curr_batch_size):
-                    s_x = support_x[j].to(self.device)
-                    s_y = support_y[j].to(self.device)
-                    q_x = query_x[j].to(self.device)
-                    q_y = query_y[j].to(self.device)
+            # Process each task individually
+            for j in range(curr_batch_size):
+                s_x = support_x[j].to(self.device)
+                s_y = support_y[j].to(self.device)
+                q_x = query_x[j].to(self.device)
+                q_y = query_y[j].to(self.device)
 
-                    # 不需要创建计算图的快速适应
+                # Store original parameters
+                original_params = OrderedDict(
+                    (name, param.clone()) for (name, param) in self.model.named_parameters()
+                )
+
+                # Inner loop adaptation - needs gradients
+                with torch.enable_grad():
                     fast_weights = OrderedDict(
                         (name, param.clone()) for (name, param) in self.model.named_parameters()
                     )
 
-                    # 内循环适应
+                    # Inner loop adaptation
                     for step in range(self.config.INNER_STEPS):
                         if hasattr(self.model, 'use_dynamic_graph') and self.model.use_dynamic_graph:
                             logits, _ = self.model(s_x, self.distance_matrix)
@@ -330,24 +343,20 @@ class MAMLTrainer:
 
                         loss = F.cross_entropy(logits, s_y)
 
-                        # 计算梯度
+                        # Calculate gradients
                         grads = torch.autograd.grad(
                             loss,
                             [p for p in self.model.parameters() if p.requires_grad],
-                            create_graph=False  # 验证时不需要二阶导数
+                            create_graph=False
                         )
 
-                        # 更新权重
+                        # Update weights
                         for (name, param), grad in zip(self.model.named_parameters(), grads):
                             if param.requires_grad:
-                                fast_weights[name] = param - self.config.INNER_LR * grad
+                                param.data = param - self.config.INNER_LR * grad
 
-                        # 临时用新权重替换模型参数
-                        for name, param in self.model.named_parameters():
-                            if param.requires_grad:
-                                param.data = fast_weights[name]
-
-                    # 在查询集上评估
+                # Evaluate on query set - no gradients needed
+                with torch.no_grad():
                     if hasattr(self.model, 'use_dynamic_graph') and self.model.use_dynamic_graph:
                         query_logits, _ = self.model(q_x, self.distance_matrix)
                     else:
@@ -359,22 +368,18 @@ class MAMLTrainer:
                     all_task_losses.append(query_loss.item())
                     all_task_accs.append(query_acc)
 
-                    # 恢复原始模型参数
-                    original_weights = OrderedDict(
-                        (name, param.clone()) for (name, param) in self.model.named_parameters()
-                    )
-                    for name, param in self.model.named_parameters():
-                        if param.requires_grad:
-                            param.data = original_weights[name]
+                # Restore original parameters
+                for name, param in self.model.named_parameters():
+                    param.data = original_params[name]
 
-        # 计算平均任务损失和准确率
+        # Calculate average task loss and accuracy
         avg_task_loss = np.mean(all_task_losses)
         avg_task_acc = np.mean(all_task_accs)
 
         return avg_task_loss, avg_task_acc
 
     def meta_test(self):
-        """在测试集上进行全面评估"""
+        """Comprehensive evaluation on the test set"""
         self.model.eval()
 
         all_task_losses = []
@@ -382,23 +387,24 @@ class MAMLTrainer:
         all_predictions = []
         all_targets = []
 
-        # 采样测试任务
+        # Sample test tasks
         for i in range(0, self.config.EVAL_TASKS, 1):
             task_batch = self.test_sampler.sample(1)
 
-            # 提取支持集和查询集
+            # Extract support and query sets
             support_x = task_batch['support_x'][0].to(self.device)
             support_y = task_batch['support_y'][0].to(self.device)
             query_x = task_batch['query_x'][0].to(self.device)
             query_y = task_batch['query_y'][0].to(self.device)
 
-            # 快速适应
-            with torch.no_grad():
-                fast_weights = OrderedDict(
-                    (name, param.clone()) for (name, param) in self.model.named_parameters()
-                )
+            # Store original parameters
+            original_params = OrderedDict(
+                (name, param.clone()) for (name, param) in self.model.named_parameters()
+            )
 
-                # 内循环适应
+            # Inner loop adaptation - needs gradients
+            with torch.enable_grad():
+                # Inner loop adaptation
                 for step in range(self.config.INNER_STEPS):
                     if hasattr(self.model, 'use_dynamic_graph') and self.model.use_dynamic_graph:
                         logits, _ = self.model(support_x, self.distance_matrix)
@@ -407,24 +413,20 @@ class MAMLTrainer:
 
                     loss = F.cross_entropy(logits, support_y)
 
-                    # 计算梯度
+                    # Calculate gradients
                     grads = torch.autograd.grad(
                         loss,
                         [p for p in self.model.parameters() if p.requires_grad],
                         create_graph=False
                     )
 
-                    # 更新权重
+                    # Update weights
                     for (name, param), grad in zip(self.model.named_parameters(), grads):
                         if param.requires_grad:
-                            fast_weights[name] = param - self.config.INNER_LR * grad
+                            param.data = param - self.config.INNER_LR * grad
 
-                    # 临时用新权重替换模型参数
-                    for name, param in self.model.named_parameters():
-                        if param.requires_grad:
-                            param.data = fast_weights[name]
-
-                # 在查询集上评估
+            # Evaluate on query set - no gradients needed
+            with torch.no_grad():
                 if hasattr(self.model, 'use_dynamic_graph') and self.model.use_dynamic_graph:
                     query_logits, _ = self.model(query_x, self.distance_matrix)
                 else:
@@ -436,28 +438,24 @@ class MAMLTrainer:
                 all_task_losses.append(query_loss.item())
                 all_task_accs.append(query_acc)
 
-                # 收集预测和目标
+                # Collect predictions and targets
                 _, predicted = torch.max(query_logits, 1)
                 all_predictions.extend(predicted.cpu().numpy())
                 all_targets.extend(query_y.cpu().numpy())
 
-                # 恢复原始模型参数
-                original_weights = OrderedDict(
-                    (name, param.clone()) for (name, param) in self.model.named_parameters()
-                )
-                for name, param in self.model.named_parameters():
-                    if param.requires_grad:
-                        param.data = original_weights[name]
+            # Restore original parameters
+            for name, param in self.model.named_parameters():
+                param.data = original_params[name]
 
-        # 计算平均任务损失和准确率
+        # Calculate average metrics
         avg_task_loss = np.mean(all_task_losses)
         avg_task_acc = np.mean(all_task_accs)
 
-        # 计算其他性能指标
+        # Calculate other performance metrics
         all_targets = np.array(all_targets)
         all_predictions = np.array(all_predictions)
 
-        # 只保留有效的标签（可能有些任务因采样问题没有某些类别）
+        # Filter valid labels
         valid_indices = (all_targets >= 0)
         all_targets = all_targets[valid_indices]
         all_predictions = all_predictions[valid_indices]
@@ -466,7 +464,7 @@ class MAMLTrainer:
             all_targets, all_predictions, average='weighted'
         )
 
-        # 统计每个类别的准确率
+        # Calculate per-class accuracies
         class_accuracies = {}
         for cls in np.unique(all_targets):
             mask = (all_targets == cls)

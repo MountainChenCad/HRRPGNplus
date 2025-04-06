@@ -70,27 +70,33 @@ class HRRPDataset(Dataset):
         return self._load_sample(file_path)
 
     def _load_sample(self, file_path):
-        """加载并处理单个HRRP样本"""
+        """Load and process a single HRRP sample"""
         try:
-            # 加载.mat文件，提取CoHH场
+            # Load .mat file, extract CoHH field
             data = loadmat(file_path)
             if 'CoHH' in data:
                 hrrp_data = data['CoHH']
             else:
-                # 尝试查找该.mat文件中的第一个非'__'开头的字段
+                # Try to find the first non-'__' field
                 valid_keys = [k for k in data.keys() if not k.startswith('__')]
                 if not valid_keys:
-                    raise KeyError(f"在文件 {file_path} 中没有找到有效数据字段")
+                    raise KeyError(f"No valid data fields found in file {file_path}")
                 hrrp_data = data[valid_keys[0]]
 
-            # 转换为PyTorch张量，确保数据类型为float
-            hrrp_tensor = torch.from_numpy(hrrp_data).float()
+            # Convert to PyTorch tensor
+            hrrp_tensor = torch.from_numpy(abs(hrrp_data)).float()
 
-            # 应用变换（如有）
+            # Apply min-max normalization
+            hrrp_min = torch.min(hrrp_tensor)
+            hrrp_max = torch.max(hrrp_tensor)
+            if hrrp_max > hrrp_min:
+                hrrp_tensor = (hrrp_tensor - hrrp_min) / (hrrp_max - hrrp_min)
+
+            # Apply transform (if any)
             if self.transform:
                 hrrp_tensor = self.transform(hrrp_tensor)
 
-            # 提取标签
+            # Extract label
             class_name = self.extract_target_name(os.path.basename(file_path))
             label = self.class_to_idx[class_name]
             label_tensor = torch.tensor(label, dtype=torch.long)
@@ -98,8 +104,7 @@ class HRRPDataset(Dataset):
             return hrrp_tensor, label_tensor
 
         except Exception as e:
-            print(f"加载 {file_path} 时出错: {e}")
-            # 返回一个空数据和-1标签表示错误
+            print(f"Error loading {file_path}: {e}")
             return torch.zeros((1, 500)), torch.tensor(-1)
 
     def extract_target_name(self, file_name):

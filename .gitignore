@@ -5,3 +5,4 @@
 /data/test_fewshots
 /data/train_fewshots
 /data/val_fewshots
+/checkpoints

@@ -6,16 +6,17 @@ from config.base_config import BaseConfig
 
 
 class MAMLConfig(BaseConfig):
-    # 元学习参数
-    META_BATCH_SIZE = 4  # 每批处理的任务数
-    META_LR = 0.001  # 外循环学习率
-    INNER_LR = 0.05  # 内循环学习率
-    FIRST_ORDER = False  # 是否使用一阶近似（True为一阶，False为二阶）
-    INNER_STEPS = 5  # 内循环更新步数
+
     META_EPOCHS = 200  # 元训练总轮次
+    # Critical MAML hyperparameters
+    INNER_LR = 0.001  # Drastically reduce from current value
+    INNER_STEPS = 2  # Reduce to minimum effective steps
+    FIRST_ORDER = True  # Use first-order approximation for stability
+    META_LR = 0.0003  # Reduce meta learning rate
+    META_BATCH_SIZE = 2  # Start with smaller batch size
 
     # 小样本设置
-    N_WAY = 5  # N-way分类
+    N_WAY = 3  # N-way分类
     K_SHOT = 1  # K-shot支持集
     Q_QUERY = 15  # 每类查询样本数
 
@@ -29,9 +30,9 @@ class MAMLConfig(BaseConfig):
     NUM_HEADS = 4  # 多头注意力数量
 
     # 课程学习参数
-    USE_CURRICULUM = True  # 是否使用课程学习
-    INIT_TEMP = 0.5  # 初始温度系数
-    TEMP_DECAY = 0.98  # 温度衰减率
+    USE_CURRICULUM = True # 是否使用课程学习
+    INIT_TEMP = 1.0  # 初始温度系数
+    TEMP_DECAY = 0.99  # 温度衰减率
 
     # 元学习优化器配置
     META_OPTIMIZER = 'Adam'  # 元优化器类型
@@ -50,7 +51,7 @@ class MAMLConfig(BaseConfig):
     KEEP_SNAPSHOTS = 5  # 保留的快照数量
 
     # 验证设置
-    VAL_INTERVAL = 1  # 每隔多少个epoch进行一次验证
+    VAL_INTERVAL = 10  # 每隔多少个epoch进行一次验证
 
     @classmethod
     def get_shot_values(cls):
