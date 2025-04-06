@@ -1,30 +1,31 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.init import xavier_uniform_, zeros_
+from torch.nn.init import xavier_uniform_, orthogonal_, zeros_, kaiming_normal_
 from config import Config
 
 
 class GraphAttention(nn.Module):
-    """多头图注意力层"""
+    """Multi-head graph attention layer"""
 
-    def __init__(self, in_features, out_features, heads=4, dropout=0.1):
+    def __init__(self, in_features, out_features=None, heads=4, dropout=0.1):
         super(GraphAttention, self).__init__()
         self.in_features = in_features
-        self.out_features = out_features
+        self.out_features = out_features or in_features
         self.heads = heads
         self.dropout = dropout
+        self.head_dim = self.out_features // heads
 
-        # 多头注意力投影矩阵
-        self.W_q = nn.Parameter(torch.FloatTensor(heads, in_features, out_features // heads))
-        self.W_k = nn.Parameter(torch.FloatTensor(heads, in_features, out_features // heads))
-        self.W_v = nn.Parameter(torch.FloatTensor(heads, in_features, out_features // heads))
-        self.W_o = nn.Parameter(torch.FloatTensor(out_features, out_features))
+        # Multi-head attention projection matrices
+        self.W_q = nn.Parameter(torch.FloatTensor(heads, in_features, self.head_dim))
+        self.W_k = nn.Parameter(torch.FloatTensor(heads, in_features, self.head_dim))
+        self.W_v = nn.Parameter(torch.FloatTensor(heads, in_features, self.head_dim))
+        self.W_o = nn.Parameter(torch.FloatTensor(self.out_features, self.out_features))
 
-        # 邻接矩阵投影
-        self.W_a = nn.Parameter(torch.FloatTensor(out_features, 1))
+        # Adjacency matrix projection
+        self.W_a = nn.Parameter(torch.FloatTensor(self.out_features, 1))
 
-        # 初始化参数
+        # Parameter initialization
         xavier_uniform_(self.W_q)
         xavier_uniform_(self.W_k)
         xavier_uniform_(self.W_v)
@@ -36,28 +37,31 @@ class GraphAttention(nn.Module):
 
     def forward(self, x):
         """
-        输入: x [batch_size, channels, seq_len]
-        输出: attention_output [batch_size, out_features, seq_len],
-              adj_matrix [batch_size, seq_len, seq_len]
+        Input: x [batch_size, channels, seq_len]
+        Output: attention_output [batch_size, out_features, seq_len],
+                adj_matrix [batch_size, seq_len, seq_len]
         """
         batch_size, C, N = x.size()
-        x_t = x.transpose(1, 2)  # [batch_size, seq_len, channels]
 
-        # 多头注意力
+        # Normalize input for stability
+        x_norm = F.normalize(x, p=2, dim=1)
+        x_t = x_norm.transpose(1, 2)  # [batch_size, seq_len, channels]
+
+        # Multi-head attention
         q_heads = []
         k_heads = []
         v_heads = []
 
         for head in range(self.heads):
-            q = torch.matmul(x_t, self.W_q[head])  # [batch_size, seq_len, out_features//heads]
-            k = torch.matmul(x_t, self.W_k[head])  # [batch_size, seq_len, out_features//heads]
-            v = torch.matmul(x_t, self.W_v[head])  # [batch_size, seq_len, out_features//heads]
+            q = torch.matmul(x_t, self.W_q[head])  # [batch_size, seq_len, head_dim]
+            k = torch.matmul(x_t, self.W_k[head])  # [batch_size, seq_len, head_dim]
+            v = torch.matmul(x_t, self.W_v[head])  # [batch_size, seq_len, head_dim]
 
             q_heads.append(q)
             k_heads.append(k)
             v_heads.append(v)
 
-        # 计算注意力得分
+        # Calculate attention scores
         attn_scores = []
         attn_outputs = []
 
@@ -70,52 +74,111 @@ class GraphAttention(nn.Module):
             attn_scores.append(attn_score)
             attn_outputs.append(attn_output)
 
-        # 合并多头注意力结果
+        # Combine multi-head attention results
         attn_output = torch.cat(attn_outputs, dim=-1)  # [batch_size, seq_len, out_features]
         attn_output = torch.matmul(attn_output, self.W_o)  # [batch_size, seq_len, out_features]
 
-        # 生成邻接矩阵
+        # Generate adjacency matrix
         adj_matrix = torch.mean(torch.stack(attn_scores), dim=0)  # [batch_size, seq_len, seq_len]
 
         return attn_output.transpose(1,
                                      2), adj_matrix  # [batch_size, out_features, seq_len], [batch_size, seq_len, seq_len]
 
 
-class DynamicGraphGenerator(nn.Module):
-    """动态图生成模块"""
+class FeatureExtractor(nn.Module):
+    """Feature extraction module for HRRP data"""
 
-    def __init__(self, in_channels, hidden_channels, heads=4, dropout=0.1):
+    def __init__(self, in_channels=1, out_channels=1, hidden_dim=16):
+        super(FeatureExtractor, self).__init__()
+
+        self.conv_layers = nn.Sequential(
+            # First conv block
+            nn.Conv1d(in_channels, hidden_dim, kernel_size=5, padding=2),
+            nn.BatchNorm1d(hidden_dim),
+            nn.LeakyReLU(),
+
+            # Second conv block
+            nn.Conv1d(hidden_dim, hidden_dim * 2, kernel_size=3, padding=1),
+            nn.BatchNorm1d(hidden_dim * 2),
+            nn.LeakyReLU(),
+
+            # Final conv to restore channel dimension
+            nn.Conv1d(hidden_dim * 2, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm1d(out_channels),
+            nn.LeakyReLU()
+        )
+
+        # Initialize with Kaiming initialization
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                kaiming_normal_(m.weight, mode='fan_out', nonlinearity='leaky_relu')
+                if m.bias is not None:
+                    zeros_(m.bias)
+
+    def forward(self, x):
+        """
+        Input: x [batch_size, in_channels, seq_len]
+        Output: x [batch_size, out_channels, seq_len]
+        """
+        return self.conv_layers(x)
+
+
+class DynamicGraphGenerator(nn.Module):
+    """Dynamic graph generation module"""
+
+    def __init__(self, in_channels=1, hidden_channels=64, heads=4, dropout=0.1):
         super(DynamicGraphGenerator, self).__init__()
-        self.conv1d = nn.Conv1d(in_channels, hidden_channels, kernel_size=3, padding=1)
-        self.bn = nn.BatchNorm1d(hidden_channels)
-        self.attention = GraphAttention(hidden_channels, hidden_channels, heads=heads, dropout=dropout)
+
+        # Feature enhancement layer
+        self.feature_enhance = nn.Sequential(
+            nn.Conv1d(in_channels, hidden_channels, kernel_size=3, padding=1),
+            nn.BatchNorm1d(hidden_channels),
+            nn.LeakyReLU()
+        )
+
+        self.attention = GraphAttention(
+            in_features=hidden_channels,
+            out_features=hidden_channels,
+            heads=heads,
+            dropout=dropout
+        )
+
         self.lambda_mix = Config.lambda_mix
+        self.use_dynamic_graph = Config.use_dynamic_graph
+
+        # Initialize parameters
+        for m in self.feature_enhance.modules():
+            if isinstance(m, nn.Conv1d):
+                kaiming_normal_(m.weight, mode='fan_out', nonlinearity='leaky_relu')
+                if m.bias is not None:
+                    zeros_(m.bias)
 
     def forward(self, x, static_adj=None):
         """
-        输入: x [batch_size, in_channels, seq_len]
-        输出: x_enhanced [batch_size, hidden_channels, seq_len],
-              dynamic_adj [batch_size, seq_len, seq_len]
+        Input: x [batch_size, in_channels, seq_len]
+        Output: x_enhanced [batch_size, hidden_channels, seq_len],
+               dynamic_adj [batch_size, seq_len, seq_len]
         """
         batch_size, _, seq_len = x.size()
 
-        # 特征增强
-        x_enhanced = F.leaky_relu(self.bn(self.conv1d(x)))
+        # Feature enhancement
+        x_enhanced = self.feature_enhance(x)
 
-        # 注意力驱动的邻接矩阵生成
+        # Attention-driven adjacency matrix generation
         _, attn_adj = self.attention(x_enhanced)
 
         if not Config.use_dynamic_graph:
-            # 如果不使用动态图，则直接返回静态邻接矩阵
+            # If not using dynamic graph, return static adjacency matrix
             return x_enhanced, static_adj
 
         if static_adj is not None:
-            # 混合静态和动态邻接矩阵
-            dynamic_adj = self.lambda_mix * static_adj + (1 - self.lambda_mix) * attn_adj
+            # Mix static and dynamic adjacency matrices with random perturbation
+            dynamic_lambda = max(0.1, min(0.9, self.lambda_mix))
+            dynamic_adj = dynamic_lambda * static_adj + (1 - dynamic_lambda) * attn_adj
         else:
             dynamic_adj = attn_adj
 
-        # 归一化邻接矩阵
+        # Normalize adjacency matrix
         D = torch.sum(dynamic_adj, dim=2, keepdim=True)
         D_sqrt_inv = torch.pow(D, -0.5)
         D_sqrt_inv[torch.isinf(D_sqrt_inv)] = 0.0
@@ -125,58 +188,77 @@ class DynamicGraphGenerator(nn.Module):
 
 
 class GraphConvLayer(nn.Module):
-    """图卷积层"""
+    """Graph convolution layer"""
 
-    def __init__(self, in_channels, out_channels, bias=True):
+    def __init__(self, in_channels, out_channels, heads=4, bias=True):
         super(GraphConvLayer, self).__init__()
         self.weight = nn.Parameter(torch.FloatTensor(in_channels, out_channels))
+
         if bias:
             self.bias = nn.Parameter(torch.FloatTensor(out_channels))
         else:
             self.register_parameter('bias', None)
 
-        # 初始化参数
-        xavier_uniform_(self.weight)
+        # Add batch normalization
+        self.bn = nn.BatchNorm1d(out_channels)
+        self.activation = nn.LeakyReLU()
+
+        # Initialize parameters
+        orthogonal_(self.weight)
         if self.bias is not None:
             zeros_(self.bias)
 
     def forward(self, x, adj):
         """
-        输入: x [batch_size, in_channels, seq_len]
+        Input: x [batch_size, in_channels, seq_len]
               adj [batch_size, seq_len, seq_len]
-        输出: output [batch_size, out_channels, seq_len]
+        Output: output [batch_size, out_channels, seq_len]
         """
         x_t = x.transpose(1, 2)  # [batch_size, seq_len, in_channels]
 
-        # 图卷积操作
+        # Graph convolution operation
         support = torch.matmul(x_t, self.weight)  # [batch_size, seq_len, out_channels]
         output = torch.bmm(adj, support)  # [batch_size, seq_len, out_channels]
 
         if self.bias is not None:
             output = output + self.bias
 
-        return output.transpose(1, 2)  # [batch_size, out_channels, seq_len]
+        # Apply batch normalization and activation
+        output = output.transpose(1, 2)  # [batch_size, out_channels, seq_len]
+        output = self.bn(output)
+        output = self.activation(output)
+
+        return output
 
 
-class GraphAttentionPooling(nn.Module):
-    """图注意力池化层"""
+class GlobalAttentionPooling(nn.Module):
+    """Global attention pooling layer"""
 
     def __init__(self, in_channels):
-        super(GraphAttentionPooling, self).__init__()
-        self.attention = nn.Linear(in_channels, 1)
-        xavier_uniform_(self.attention.weight)
-        zeros_(self.attention.bias)
+        super(GlobalAttentionPooling, self).__init__()
+        self.attention = nn.Sequential(
+            nn.Linear(in_channels, in_channels // 2),
+            nn.LeakyReLU(),
+            nn.Linear(in_channels // 2, 1)
+        )
+
+        # Initialize parameters
+        for m in self.attention.modules():
+            if isinstance(m, nn.Linear):
+                xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    zeros_(m.bias)
 
     def forward(self, x):
         """
-        输入: x [batch_size, in_channels, seq_len]
-        输出: pooled [batch_size, in_channels]
+        Input: x [batch_size, in_channels, seq_len]
+        Output: pooled [batch_size, in_channels]
         """
         x_t = x.transpose(1, 2)  # [batch_size, seq_len, in_channels]
         attn_score = self.attention(x_t)  # [batch_size, seq_len, 1]
         attn_weight = F.softmax(attn_score, dim=1)  # [batch_size, seq_len, 1]
 
-        # 加权求和
+        # Weighted sum
         weighted_x = x_t * attn_weight  # [batch_size, seq_len, in_channels]
         pooled = torch.sum(weighted_x, dim=1)  # [batch_size, in_channels]
 
@@ -184,18 +266,24 @@ class GraphAttentionPooling(nn.Module):
 
 
 class HRRPGraphNet(nn.Module):
-    """整合动态图的HRRP图网络"""
+    """HRRP Graph Network with dynamic graph integration"""
 
     def __init__(self, num_classes, feature_size=None):
         super(HRRPGraphNet, self).__init__()
 
-        # 初始化参数
+        # Initialize parameters
         feature_size = feature_size or Config.feature_size
         hidden_channels = Config.hidden_channels
         attention_heads = Config.attention_heads
         dropout = Config.dropout
 
-        # 动态图生成模块
+        # Feature extraction module (added)
+        self.feature_extractor = FeatureExtractor(
+            in_channels=1,
+            out_channels=1
+        )
+
+        # Dynamic graph generation module
         self.graph_generator = DynamicGraphGenerator(
             in_channels=1,
             hidden_channels=hidden_channels,
@@ -203,44 +291,50 @@ class HRRPGraphNet(nn.Module):
             dropout=dropout
         )
 
-        # 图卷积层
+        # Graph convolution layers
         self.graph_convs = nn.ModuleList()
-        self.graph_convs.append(GraphConvLayer(hidden_channels, hidden_channels * 2))
+        self.graph_convs.append(GraphConvLayer(hidden_channels, hidden_channels))
 
         for _ in range(Config.graph_conv_layers - 1):
-            self.graph_convs.append(GraphConvLayer(hidden_channels * 2, hidden_channels * 2))
+            self.graph_convs.append(GraphConvLayer(hidden_channels, hidden_channels))
 
-        # 池化层
-        self.pooling = GraphAttentionPooling(hidden_channels * 2)
+        # Pooling layer
+        self.pooling = GlobalAttentionPooling(hidden_channels)
 
-        # 分类层
-        self.fc = nn.Linear(hidden_channels * 2, num_classes)
-        xavier_uniform_(self.fc.weight)
+        # Classification layer
+        self.fc = nn.Linear(hidden_channels, num_classes)
+        orthogonal_(self.fc.weight)
         zeros_(self.fc.bias)
 
         # Dropout
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, static_adj=None):
+    def forward(self, x, static_adj=None, return_features=False):
         """
-        输入: x [batch_size, 1, seq_len]
-              static_adj [batch_size, seq_len, seq_len] 可选
-        输出: logits [batch_size, num_classes]
+        Input: x [batch_size, 1, seq_len]
+              static_adj [batch_size, seq_len, seq_len] optional
+        Output: logits [batch_size, num_classes]
         """
-        # 生成动态图
+        # Apply feature extraction
+        x = self.feature_extractor(x)
+
+        # Generate dynamic graph
         x_enhanced, dynamic_adj = self.graph_generator(x, static_adj)
 
-        # 图卷积
+        # Graph convolution
         h = x_enhanced
         for conv in self.graph_convs:
             h = conv(h, dynamic_adj)
-            h = F.leaky_relu(h)
             h = self.dropout(h)
 
-        # 图池化
+        # Graph pooling
         h_pooled = self.pooling(h)
 
-        # 分类
+        # Return features if requested
+        if return_features:
+            return self.fc(h_pooled), h_pooled
+
+        # Classification
         logits = self.fc(h_pooled)
 
         return logits, dynamic_adj
@@ -253,25 +347,28 @@ class MDGN(nn.Module):
         super(MDGN, self).__init__()
         self.encoder = HRRPGraphNet(num_classes=num_classes)
 
-        # 确保所有参数需要梯度
+        # Ensure all parameters require gradients
         for param in self.parameters():
             param.requires_grad = True
 
-        # 打印参数信息用于调试
+        # Print parameter information for debugging
         total_params = sum(p.numel() for p in self.parameters())
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        print(f"MDGN初始化: {total_params}个参数 ({trainable_params}个可训练)")
+        print(f"MDGN initialized: {total_params} parameters ({trainable_params} trainable)")
 
-    def forward(self, x, static_adj=None):
-        # 确保输入数据和权重在同一设备上
+    def forward(self, x, static_adj=None, return_features=False):
+        # Ensure input data and weights are on the same device
         device = next(self.parameters()).device
         x = x.to(device)
         if static_adj is not None:
             static_adj = static_adj.to(device)
+
+        if return_features:
+            return self.encoder(x, static_adj, return_features=True)
         return self.encoder(x, static_adj)
 
     def clone(self):
-        """创建模型的深拷贝，用于MAML内循环更新"""
+        """Create a deep copy of the model for MAML inner loop update"""
         device = next(self.parameters()).device
         clone = MDGN(num_classes=self.encoder.fc.out_features)
         clone.load_state_dict(self.state_dict())
@@ -279,11 +376,11 @@ class MDGN(nn.Module):
         return clone
 
     def adapt_params(self, loss, lr=0.01):
-        """根据损失更新参数，返回更新后的参数字典"""
-        # 确保所有参数需要梯度
+        """Update parameters based on loss, return updated parameter dictionary"""
+        # Ensure all parameters require gradients
         for name, param in self.named_parameters():
             if not param.requires_grad:
-                print(f"警告: 参数 {name} 不需要梯度")
+                print(f"Warning: Parameter {name} doesn't require gradients")
                 param.requires_grad = True
 
         grads = torch.autograd.grad(loss, self.parameters(), create_graph=True, allow_unused=True)
@@ -291,16 +388,16 @@ class MDGN(nn.Module):
         updated_params = {}
         for (name, param), grad in zip(self.named_parameters(), grads):
             if grad is None:
-                # 如果梯度为None，使用零梯度替代
+                # If gradient is None, use zero gradient
                 updated_params[name] = param
-                print(f"参数 {name} 梯度为None")
+                print(f"Parameter {name} has None gradient")
             else:
                 updated_params[name] = param - lr * grad
 
         return updated_params
 
     def set_params(self, params):
-        """从参数字典设置参数"""
+        """Set parameters from parameter dictionary"""
         for name, param in self.named_parameters():
             if name in params:
                 param.data = params[name].data

@@ -8,12 +8,23 @@ import os
 from config import Config
 
 
+# In utils.py, modify generate_distance_matrix:
 def generate_distance_matrix(N):
-    """生成基于距离的静态邻接矩阵"""
+    """Generate a more sophisticated static adjacency matrix"""
     distance_matrix = torch.zeros(N, N, dtype=torch.float32)
+
+    # Combine both distance and window-based connectivity
     for i in range(N):
         for j in range(N):
-            distance_matrix[i, j] = 1 / (abs(i - j) + 1)
+            # Distance-based connectivity
+            dist_weight = 1.0 / (abs(i - j) + 1)
+
+            # Window-based connectivity (strong local connections)
+            window_weight = 1.0 if abs(i - j) <= 5 else 0.0
+
+            # Combined weighting
+            distance_matrix[i, j] = 0.7 * dist_weight + 0.3 * window_weight
+
     return distance_matrix
 
 

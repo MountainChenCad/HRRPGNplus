@@ -63,7 +63,7 @@ class Config:
 
     # 动态图配置
     lambda_mix = 0.3  # 静态和动态图混合比例
-    use_dynamic_graph = False  # 是否使用动态图
+    use_dynamic_graph = True  # 是否使用动态图
 
     # MAML配置
     inner_lr = 0.005  # Reduce from 0.01
@@ -84,7 +84,7 @@ class Config:
 
     # 消融实验配置
     ablation = {
-        'dynamic_graph': False,
+        'dynamic_graph': True,
         'maml': True,
         'lambda_values': [0, 0.25, 0.5, 0.75, 1.0],
         'inner_steps_values': [1, 3, 5, 10],
