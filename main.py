@@ -96,9 +96,28 @@ def train(args, vis=False):
 
     print(f"\n最终训练参数: {Config.k_shot}-shot, {Config.q_query}-query")
 
-    # 设置任务生成器
+    # 创建任务生成器
     train_task_generator = TaskGenerator(train_dataset, n_way=Config.train_n_way, k_shot=Config.k_shot,
                                          q_query=Config.q_query)
+
+    # 数据形状调试
+    print("\n数据形状调试:")
+    try:
+        sample_task = train_task_generator.generate_task()
+        support_x, support_y, query_x, query_y = sample_task
+        print(f"支持集 X: 形状={support_x.shape}, 类型={support_x.dtype}")
+        print(f"查询集 X: 形状={query_x.shape}, 类型={query_x.dtype}")
+
+        # 检查是否为复数
+        if torch.is_complex(support_x):
+            print("警告: 支持集数据为复数类型，将转换为实数")
+            support_x = torch.abs(support_x)
+
+        # 检查值范围
+        print(f"支持集数据范围: {support_x.min().item()} 到 {support_x.max().item()}")
+    except Exception as e:
+        print(f"调试时出错: {e}")
+
     val_task_generator = TaskGenerator(test_dataset, n_way=Config.test_n_way, k_shot=Config.k_shot,
                                        q_query=Config.q_query)
 

@@ -253,19 +253,51 @@ class MDGN(nn.Module):
         super(MDGN, self).__init__()
         self.encoder = HRRPGraphNet(num_classes=num_classes)
 
+        # 确保所有参数需要梯度
+        for param in self.parameters():
+            param.requires_grad = True
+
+        # 打印参数信息用于调试
+        total_params = sum(p.numel() for p in self.parameters())
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"MDGN初始化: {total_params}个参数 ({trainable_params}个可训练)")
+
     def forward(self, x, static_adj=None):
+        # 确保输入数据和权重在同一设备上
+        device = next(self.parameters()).device
+        x = x.to(device)
+        if static_adj is not None:
+            static_adj = static_adj.to(device)
         return self.encoder(x, static_adj)
 
     def clone(self):
         """创建模型的深拷贝，用于MAML内循环更新"""
+        device = next(self.parameters()).device
         clone = MDGN(num_classes=self.encoder.fc.out_features)
         clone.load_state_dict(self.state_dict())
+        clone = clone.to(device)
         return clone
 
     def adapt_params(self, loss, lr=0.01):
         """根据损失更新参数，返回更新后的参数字典"""
-        grads = torch.autograd.grad(loss, self.parameters(), create_graph=True)
-        return {name: param - lr * grad for (name, param), grad in zip(self.named_parameters(), grads)}
+        # 确保所有参数需要梯度
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                print(f"警告: 参数 {name} 不需要梯度")
+                param.requires_grad = True
+
+        grads = torch.autograd.grad(loss, self.parameters(), create_graph=True, allow_unused=True)
+
+        updated_params = {}
+        for (name, param), grad in zip(self.named_parameters(), grads):
+            if grad is None:
+                # 如果梯度为None，使用零梯度替代
+                updated_params[name] = param
+                print(f"参数 {name} 梯度为None")
+            else:
+                updated_params[name] = param - lr * grad
+
+        return updated_params
 
     def set_params(self, params):
         """从参数字典设置参数"""

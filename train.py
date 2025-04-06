@@ -12,44 +12,54 @@ from utils import prepare_static_adjacency, compute_metrics, log_metrics, save_m
 
 
 class MAMLTrainer:
-    """MAML训练器"""
+    """简化的MAML训练器，使用标准优化器"""
 
     def __init__(self, model, device):
         self.model = model.to(device)
         self.device = device
-        self.outer_optimizer = torch.optim.Adam(
+        self.meta_optimizer = torch.optim.Adam(
             self.model.parameters(),
             lr=Config.outer_lr,
             weight_decay=Config.weight_decay
         )
         self.criterion = nn.CrossEntropyLoss()
 
-    def inner_loop(self, support_x, support_y, inner_steps=None, inner_lr=None):
-        """MAML内循环更新"""
-        inner_steps = inner_steps or Config.inner_steps
-        inner_lr = inner_lr or Config.inner_lr
+    def inner_loop(self, support_x, support_y):
+        """简化的内循环，使用标准优化器"""
+        print(f"Internal shape check - support_x: {support_x.shape}")
 
-        # 克隆模型进行内循环更新
-        updated_model = self.model.clone()
+        # 克隆模型
+        updated_model = copy.deepcopy(self.model)
         updated_model.train()
 
-        batch_size, _, seq_len = support_x.size()
+        # 确保数据在正确设备上
+        support_x = support_x.to(self.device)
+        support_y = support_y.to(self.device)
+
+        # 创建内循环优化器
+        inner_optimizer = torch.optim.SGD(
+            updated_model.parameters(),
+            lr=Config.inner_lr
+        )
+
+        batch_size, channels, seq_len = support_x.shape
         static_adj = prepare_static_adjacency(batch_size, seq_len, self.device)
 
-        # 执行内循环更新
-        for _ in range(inner_steps):
-            # 前向传播
+        # 内循环更新
+        for step in range(Config.inner_steps):
+            inner_optimizer.zero_grad()
             logits, _ = updated_model(support_x, static_adj)
             loss = self.criterion(logits, support_y)
+            loss.backward()
+            inner_optimizer.step()
 
-            # 更新模型参数
-            params = updated_model.adapt_params(loss, lr=inner_lr)
-            updated_model.set_params(params)
+            if step == 0:  # 只打印第一步的损失
+                print(f"  Inner step 1 loss: {loss.item():.4f}")
 
         return updated_model
 
     def outer_step(self, tasks, train=True):
-        """MAML外循环步骤"""
+        """外循环步骤"""
         outer_loss = 0.0
         accuracies = []
 
@@ -60,29 +70,27 @@ class MAMLTrainer:
             updated_model = self.inner_loop(support_x, support_y)
 
             # 在查询集上评估
-            batch_size, _, seq_len = query_x.size()
+            batch_size, channels, seq_len = query_x.shape
             static_adj = prepare_static_adjacency(batch_size, seq_len, self.device)
-            logits, _ = updated_model(query_x, static_adj)
-            task_loss = self.criterion(logits, query_y)
 
-            outer_loss += task_loss
+            with torch.enable_grad() if train else torch.no_grad():
+                logits, _ = updated_model(query_x, static_adj)
+                task_loss = self.criterion(logits, query_y)
 
-            # 计算准确率
-            with torch.no_grad():
+                if train:
+                    # 梯度优化 - 外循环
+                    self.meta_optimizer.zero_grad()
+                    task_loss.backward()
+                    self.meta_optimizer.step()
+
+                # 计算准确率
                 pred = torch.argmax(logits, dim=1)
                 accuracy = (pred == query_y).float().mean().item()
+                outer_loss += task_loss.item()
                 accuracies.append(accuracy)
 
-        # 平均所有任务的损失
-        outer_loss = outer_loss / len(tasks)
-
-        # 如果是训练模式，执行梯度更新
-        if train:
-            self.outer_optimizer.zero_grad()
-            outer_loss.backward()
-            self.outer_optimizer.step()
-
-        return outer_loss.item(), np.mean(accuracies) * 100
+        # 平均所有任务的损失和准确率
+        return outer_loss / len(tasks), np.mean(accuracies) * 100
 
     def train_epoch(self, task_generator, num_tasks=None):
         """训练一个epoch"""
@@ -169,10 +177,8 @@ class MAMLTrainer:
 def test_model(model, test_task_generator, device, num_tasks=None, shot=None):
     """测试模型在新类上的性能"""
     num_tasks = num_tasks or Config.num_tasks
-    inner_steps = Config.inner_steps
-    inner_lr = Config.inner_lr
 
-    # 如果指定了shot，临时修改task generator的k_shot
+    # 保存原始k_shot并设置新值
     original_k_shot = test_task_generator.k_shot
     if shot is not None:
         test_task_generator.k_shot = shot
@@ -182,44 +188,59 @@ def test_model(model, test_task_generator, device, num_tasks=None, shot=None):
     all_accuracies = []
 
     for task_idx in tqdm(range(num_tasks), desc="Testing"):
-        support_x, support_y, query_x, query_y = test_task_generator.generate_task()
-        support_x, support_y = support_x.to(device), support_y.to(device)
-        query_x, query_y = query_x.to(device), query_y.to(device)
+        try:
+            support_x, support_y, query_x, query_y = test_task_generator.generate_task()
+            support_x, support_y = support_x.to(device), support_y.to(device)
+            query_x, query_y = query_x.to(device), query_y.to(device)
 
-        # 克隆模型进行内循环更新
-        updated_model = model.clone()
-        updated_model.train()
+            # 克隆模型
+            updated_model = copy.deepcopy(model)
+            updated_model.train()
 
-        batch_size, _, seq_len = support_x.size()
-        static_adj = prepare_static_adjacency(batch_size, seq_len, device)
+            # 创建优化器
+            inner_optimizer = torch.optim.SGD(
+                updated_model.parameters(),
+                lr=Config.inner_lr
+            )
 
-        # 内循环适应
-        for _ in range(inner_steps):
-            logits, _ = updated_model(support_x, static_adj)
-            loss = F.cross_entropy(logits, support_y)
-            params = updated_model.adapt_params(loss, lr=inner_lr)
-            updated_model.set_params(params)
+            batch_size, channels, seq_len = support_x.shape
+            static_adj = prepare_static_adjacency(batch_size, seq_len, device)
 
-        # 在查询集上评估
-        updated_model.eval()
-        batch_size, _, seq_len = query_x.size()
-        static_adj = prepare_static_adjacency(batch_size, seq_len, device)
+            # 内循环适应
+            for _ in range(Config.inner_steps):
+                inner_optimizer.zero_grad()
+                logits, _ = updated_model(support_x, static_adj)
+                loss = nn.CrossEntropyLoss()(logits, support_y)
+                loss.backward()
+                inner_optimizer.step()
 
-        with torch.no_grad():
-            logits, _ = updated_model(query_x, static_adj)
-            pred = torch.argmax(logits, dim=1)
+            # 在查询集上评估
+            updated_model.eval()
+            batch_size, channels, seq_len = query_x.shape
+            static_adj = prepare_static_adjacency(batch_size, seq_len, device)
 
-            accuracy = (pred == query_y).float().mean().item()
-            all_accuracies.append(accuracy)
-            total_accuracy += accuracy
+            with torch.no_grad():
+                logits, _ = updated_model(query_x, static_adj)
+                pred = torch.argmax(logits, dim=1)
+
+                accuracy = (pred == query_y).float().mean().item()
+                all_accuracies.append(accuracy)
+                total_accuracy += accuracy
+
+        except Exception as e:
+            print(f"测试任务 {task_idx} 出错: {e}")
+            continue
 
     # 恢复原始k_shot
     if shot is not None:
         test_task_generator.k_shot = original_k_shot
 
-    avg_accuracy = total_accuracy / num_tasks
+    if not all_accuracies:
+        return 0, 0, []
+
+    avg_accuracy = total_accuracy / len(all_accuracies)
     std_accuracy = np.std(all_accuracies)
-    ci95 = 1.96 * std_accuracy / np.sqrt(num_tasks)
+    ci95 = 1.96 * std_accuracy / np.sqrt(len(all_accuracies))
 
     print(f"Test Accuracy: {avg_accuracy * 100:.2f}% ± {ci95 * 100:.2f}%")
 

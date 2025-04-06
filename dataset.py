@@ -84,17 +84,48 @@ class HRRPDataset(Dataset):
     def __getitem__(self, idx):
         file_path, label = self.samples[idx]
         try:
-            # data = torch.from_numpy(loadmat(file_path)['CoHH']).float()
-            data = torch.abs(torch.from_numpy(loadmat(file_path)['hrrp']).float()).T
+            # 加载.mat文件
+            mat_data = loadmat(file_path)
+
+            # 获取HRRP数据
+            if 'hrrp' in mat_data:
+                hrrp_data = mat_data['hrrp']
+            else:
+                # 找不到预期字段时尝试其他键
+                for key in mat_data.keys():
+                    if key not in ['__header__', '__version__', '__globals__']:
+                        hrrp_data = mat_data[key]
+                        break
+
+            # 转换为幅度并展平
+            magnitude = np.abs(hrrp_data).flatten()
+
+            # 确保长度为500
+            if len(magnitude) < 500:
+                padded = np.zeros(500)
+                padded[:len(magnitude)] = magnitude
+                magnitude = padded
+            elif len(magnitude) > 500:
+                magnitude = magnitude[:500]
+
+            # 数据规范化 - 减均值除标准差
+            if np.std(magnitude) > 1e-8:
+                magnitude = (magnitude - np.mean(magnitude)) / np.std(magnitude)
+            else:
+                magnitude = magnitude - np.mean(magnitude)  # 如果标准差近似为0
+
+            # 转换为张量并添加通道维度
+            data = torch.tensor(magnitude, dtype=torch.float32).unsqueeze(0)
+
             # 应用数据变换
             if self.transform:
                 data = self.transform(data)
 
             return data, torch.tensor(label, dtype=torch.long)
         except Exception as e:
-            print(f"加载文件时出错 {file_path}: {e}")
-            # 返回一个空张量和标签，以便于检测错误
-            return torch.zeros((1, 500)), torch.tensor(label, dtype=torch.long)
+            print(f"加载文件时出错 {file_path}: {str(e)}")
+            # 返回随机规范化数据
+            return torch.randn(1, 500), torch.tensor(label, dtype=torch.long)
 
     def get_samples_by_class(self, label, k):
         """获取指定类别的k个样本索引"""
@@ -114,13 +145,13 @@ class HRRPTransform:
         if not self.augment:
             return data
 
-        # 随机选择数据增强策略
-        aug_type = random.choice(['noise', 'occlusion', 'phase', 'amplitude', 'none'])
+        # 随机选择数据增强策略，但移除phase选项，因为我们已经丢弃了相位信息
+        aug_type = random.choice(['noise', 'occlusion', 'amplitude', 'none'])
 
         if aug_type == 'noise':
             # 添加高斯白噪声
             snr_db = random.choice(Config.noise_levels)
-            signal_power = torch.mean(torch.abs(data) ** 2)
+            signal_power = torch.mean(data ** 2)
             snr = 10 ** (snr_db / 10)
             noise_power = signal_power / snr
             noise = torch.randn_like(data) * torch.sqrt(noise_power)
@@ -133,16 +164,6 @@ class HRRPTransform:
             indices = torch.randperm(data.shape[-1])[:num_to_mask]
             mask[..., indices] = 0
             return data * mask
-
-        elif aug_type == 'phase':
-            # 相位抖动
-            amplitude = torch.abs(data)
-            phase = torch.angle(data)
-            phase_noise = Config.phase_jitter * torch.randn_like(phase)
-            new_phase = phase + phase_noise
-            real = amplitude * torch.cos(new_phase)
-            imag = amplitude * torch.sin(new_phase)
-            return torch.complex(real, imag)
 
         elif aug_type == 'amplitude':
             # 幅度缩放
@@ -185,23 +206,25 @@ class TaskGenerator:
             support_indices = samples[:self.k_shot]
             query_indices = samples[self.k_shot:self.k_shot + self.q_query]
 
-            # 收集支持集样本
+            # 收集支持集和查询集样本
             for idx in support_indices:
                 data, _ = self.dataset[idx]
                 support_x.append(data)
-                support_y.append(i)  # 使用相对标签(0到N-1)
+                support_y.append(i)
 
-            # 收集查询集样本
             for idx in query_indices:
                 data, _ = self.dataset[idx]
                 query_x.append(data)
-                query_y.append(i)  # 使用相对标签(0到N-1)
+                query_y.append(i)
 
         # 转换为张量
         support_x = torch.stack(support_x)
         support_y = torch.tensor(support_y, dtype=torch.long)
         query_x = torch.stack(query_x)
         query_y = torch.tensor(query_y, dtype=torch.long)
+
+        # 打印维度用于调试
+        print(f"任务形状: support_x {support_x.shape}, query_x {query_x.shape}")
 
         return support_x, support_y, query_x, query_y
 

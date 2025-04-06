@@ -19,6 +19,11 @@ def generate_distance_matrix(N):
 
 def prepare_static_adjacency(batch_size, feature_size, device):
     """准备批量的静态邻接矩阵"""
+    # 处理极端情况
+    if feature_size <= 1:
+        print(f"警告: 特征大小 {feature_size} 太小，使用默认大小500")
+        feature_size = 500
+
     static_adj = generate_distance_matrix(feature_size)
     static_adj = static_adj.to(device)
     static_adj = static_adj.unsqueeze(0).expand(batch_size, -1, -1)
