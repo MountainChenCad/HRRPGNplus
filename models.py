@@ -81,8 +81,7 @@ class GraphAttention(nn.Module):
         # Generate adjacency matrix
         adj_matrix = torch.mean(torch.stack(attn_scores), dim=0)  # [batch_size, seq_len, seq_len]
 
-        return attn_output.transpose(1,
-                                     2), adj_matrix  # [batch_size, out_features, seq_len], [batch_size, seq_len, seq_len]
+        return attn_output.transpose(1, 2), adj_matrix
 
 
 class FeatureExtractor(nn.Module):
@@ -277,7 +276,7 @@ class HRRPGraphNet(nn.Module):
         attention_heads = Config.attention_heads
         dropout = Config.dropout
 
-        # Feature extraction module (added)
+        # Feature extraction module
         self.feature_extractor = FeatureExtractor(
             in_channels=1,
             out_channels=1

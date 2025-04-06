@@ -6,13 +6,14 @@ import numpy as np
 from tqdm import tqdm
 import os
 import copy
+import math
 from config import Config
 from models import MDGN
 from utils import prepare_static_adjacency, compute_metrics, log_metrics, save_model, load_model
 
 
-class MAMLTrainer:
-    """Simplified trainer that maintains gradient flow"""
+class MAMLPlusPlusTrainer:
+    """MAML++ trainer with enhanced features"""
 
     def __init__(self, model, device):
         self.model = model.to(device)
@@ -22,87 +23,182 @@ class MAMLTrainer:
             lr=Config.outer_lr,
             weight_decay=Config.weight_decay
         )
+
+        # LR scheduler for cosine annealing
+        if Config.use_lr_annealing:
+            self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                self.meta_optimizer,
+                T_max=Config.T_max,
+                eta_min=Config.min_outer_lr
+            )
+        else:
+            self.scheduler = None
+
         self.criterion = nn.CrossEntropyLoss()
+        self.epoch = 0  # Track current epoch for annealing
 
-    def inner_loop(self, support_x, support_y):
-        """简化的内循环，使用标准优化器"""
-        print(f"Internal shape check - support_x: {support_x.shape}")
+        # Initialize per-layer per-step learning rates as learnable parameters
+        self.init_layer_lrs()
 
-        # 克隆模型
+    def init_layer_lrs(self):
+        """Initialize per-layer per-step learning rates"""
+        # Initialize learning rates for different layers
+        self.layer_lrs = {}
+
+        if Config.use_per_layer_lr:
+            for base_layer in ['feature_extractor', 'graph_generator', 'graph_convs', 'pooling', 'fc']:
+                self.layer_lrs[base_layer] = Config.inner_lr
+
+        self.step_lrs = [Config.inner_lr] * Config.inner_steps if Config.use_per_step_lr else [Config.inner_lr]
+
+    def get_inner_lr(self, layer_name, step):
+        """Get learning rate for a specific layer and step"""
+        if not Config.use_per_layer_lr and not Config.use_per_step_lr:
+            return Config.inner_lr
+
+        # Extract base layer name
+        if isinstance(layer_name, list):
+            # If already a list, join first two elements
+            parts = layer_name[:2]
+        else:
+            # If a string, split and take first two elements
+            parts = layer_name.split('.')[:2]
+
+        # Get base layer name (first component of the parameter name)
+        base_layer = parts[0] if len(parts) > 0 else "default"
+
+        # Layer-specific learning rate
+        layer_lr = self.layer_lrs.get(base_layer, Config.inner_lr) if Config.use_per_layer_lr else Config.inner_lr
+
+        # Step-specific learning rate factor
+        step_factor = 1.0
+        if Config.use_per_step_lr and step < len(self.step_lrs):
+            step_factor = self.step_lrs[step] / self.step_lrs[0]  # Normalize by first step lr
+
+        return layer_lr * step_factor
+
+    def inner_loop(self, support_x, support_y, create_graph=False):
+        """Simplified inner loop with multi-step loss"""
+        # Clone model to avoid affecting original parameters during inner loop
         updated_model = copy.deepcopy(self.model)
         updated_model.train()
 
-        # 确保数据在正确设备上
+        # Ensure data is on correct device
         support_x = support_x.to(self.device)
         support_y = support_y.to(self.device)
-
-        # 创建内循环优化器
-        inner_optimizer = torch.optim.SGD(
-            updated_model.parameters(),
-            lr=Config.inner_lr
-        )
 
         batch_size, channels, seq_len = support_x.shape
         static_adj = prepare_static_adjacency(batch_size, seq_len, self.device)
 
-        # 内循环更新
+        # Track losses for each step
+        step_losses = []
+        final_logits = None
+
+        # Inner loop updates
         for step in range(Config.inner_steps):
-            inner_optimizer.zero_grad()
+            # Forward pass
             logits, _ = updated_model(support_x, static_adj)
             loss = self.criterion(logits, support_y)
-            loss.backward()
-            inner_optimizer.step()
+            step_losses.append(loss)
 
-            if step == 0:  # 只打印第一步的损失
-                print(f"  Inner step 1 loss: {loss.item():.4f}")
+            if step == Config.inner_steps - 1:
+                final_logits = logits
 
-        return updated_model
+            # Compute gradients
+            grads = torch.autograd.grad(
+                loss, updated_model.parameters(),
+                create_graph=create_graph,
+                allow_unused=True
+            )
+
+            # Update each parameter with its specific learning rate
+            with torch.no_grad():
+                for (name, param), grad in zip(updated_model.named_parameters(), grads):
+                    if grad is not None:
+                        # Get layer-specific learning rate
+                        lr = self.get_inner_lr(name, step)
+                        # Update parameter
+                        param.data.sub_(lr * grad)
+
+        # Compute multi-step loss if enabled
+        if Config.use_multi_step_loss:
+            # Weighted sum of losses from all steps
+            weights = [Config.get_loss_weight(i) for i in range(len(step_losses))]
+            multi_step_loss = sum(w * l for w, l in zip(weights, step_losses))
+        else:
+            # Only use final step loss
+            multi_step_loss = step_losses[-1]
+
+        # Create dictionary of updated parameters for reference
+        updated_params = {name: param for name, param in updated_model.named_parameters()}
+
+        return updated_model, updated_params, multi_step_loss, final_logits
 
     def outer_step(self, tasks, train=True):
-        """Outer loop step with direct training on support set"""
-        outer_loss = 0.0
-        accuracies = []
+        """Outer loop optimization with MAML++ enhancements"""
+        meta_loss = 0.0
+        meta_accuracy = 0.0
+
+        # Determine whether to use second-order gradients based on current epoch
+        create_graph = Config.use_second_order and self.epoch >= Config.second_order_start_epoch if train else False
 
         for task_idx, task in enumerate(tasks):
             support_x, support_y, query_x, query_y = [t.to(self.device) for t in task]
 
+            # Inner loop adaptation - returns updated model
+            updated_model, _, support_loss, _ = self.inner_loop(
+                support_x,
+                support_y,
+                create_graph=create_graph
+            )
+
+            # Evaluate on query set
+            batch_size, channels, seq_len = query_x.shape
+            static_adj = prepare_static_adjacency(batch_size, seq_len, self.device)
+
             if train:
-                # Direct training on support set
-                batch_size, channels, seq_len = support_x.shape
-                static_adj = prepare_static_adjacency(batch_size, seq_len, self.device)
+                # For training, compute loss and update meta-parameters
+                query_logits, _ = updated_model(query_x, static_adj)
+                query_loss = self.criterion(query_logits, query_y)
 
-                self.meta_optimizer.zero_grad()
-                logits, _ = self.model(support_x, static_adj)
-                loss = self.criterion(logits, support_y)
-                loss.backward()
-                self.meta_optimizer.step()
+                # Combined loss (support + query)
+                task_loss = 0.3 * support_loss + 0.7 * query_loss
+                meta_loss += task_loss
 
-                # Evaluate on query set (no gradient)
-                with torch.no_grad():
-                    batch_size, channels, seq_len = query_x.shape
-                    static_adj = prepare_static_adjacency(batch_size, seq_len, self.device)
-                    logits, _ = self.model(query_x, static_adj)
-                    accuracy = (torch.argmax(logits, dim=1) == query_y).float().mean().item()
-                    accuracies.append(accuracy)
+                # Compute accuracy
+                pred = torch.argmax(query_logits, dim=1)
+                accuracy = (pred == query_y).float().mean().item()
+                meta_accuracy += accuracy
             else:
-                # For evaluation, keep inner loop adaptation
-                updated_model = self.inner_loop(support_x, support_y)
-
+                # For evaluation, no gradient needed
                 with torch.no_grad():
-                    batch_size, channels, seq_len = query_x.shape
-                    static_adj = prepare_static_adjacency(batch_size, seq_len, self.device)
-                    logits, _ = updated_model(query_x, static_adj)
-                    task_loss = self.criterion(logits, query_y)
-                    outer_loss += task_loss.item()
+                    query_logits, _ = updated_model(query_x, static_adj)
+                    query_loss = self.criterion(query_logits, query_y)
 
-                    pred = torch.argmax(logits, dim=1)
+                    pred = torch.argmax(query_logits, dim=1)
                     accuracy = (pred == query_y).float().mean().item()
-                    accuracies.append(accuracy)
+                    meta_accuracy += accuracy
+                    meta_loss += query_loss.item()
 
-        return outer_loss / len(tasks) if not train else 0.0, np.mean(accuracies) * 100
+        # Average loss and accuracy
+        meta_loss = meta_loss / len(tasks)
+        meta_accuracy = (meta_accuracy / len(tasks)) * 100
+
+        # Perform optimization if in training mode
+        if train and meta_loss.requires_grad:
+            self.meta_optimizer.zero_grad()
+            meta_loss.backward()
+
+            # Clip gradients for stability
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 10.0)
+
+            # Update model parameters
+            self.meta_optimizer.step()
+
+        return meta_loss.item() if train else meta_loss, meta_accuracy
 
     def train_epoch(self, task_generator, num_tasks=None):
-        """Train for one epoch"""
+        """Train for one epoch with MAML++ enhancements"""
         self.model.train()
         num_tasks = num_tasks or Config.task_batch_size
         tasks = []
@@ -112,87 +208,40 @@ class MAMLTrainer:
             support_x, support_y, query_x, query_y = task_generator.generate_task()
             tasks.append((support_x, support_y, query_x, query_y))
 
-        # Training loop
-        total_loss = 0
-        total_accuracy = 0
+        # Process tasks in batch for faster training
+        meta_loss, meta_accuracy = self.outer_step(tasks, train=True)
 
-        for task_idx, (support_x, support_y, query_x, query_y) in enumerate(tasks):
-            # Move to device
-            support_x, support_y = support_x.to(self.device), support_y.to(self.device)
-            query_x, query_y = query_x.to(self.device), query_y.to(self.device)
+        # Update learning rate with cosine annealing if enabled
+        if self.scheduler:
+            self.scheduler.step()
 
-            # Forward pass on support set
-            self.meta_optimizer.zero_grad()
-
-            # Process support set
-            support_batch_size, channels, seq_len = support_x.shape
-            support_static_adj = prepare_static_adjacency(support_batch_size, seq_len, self.device)
-
-            # Train directly on support set
-            support_logits, _ = self.model(support_x, support_static_adj)
-            support_loss = self.criterion(support_logits, support_y)
-
-            # Process query set to measure performance
-            query_batch_size, _, seq_len = query_x.shape
-            query_static_adj = prepare_static_adjacency(query_batch_size, seq_len, self.device)
-
-            query_logits, _ = self.model(query_x, query_static_adj)
-            query_loss = self.criterion(query_logits, query_y)
-
-            # Combined loss with emphasis on query performance
-            loss = 0.3 * support_loss + 0.7 * query_loss
-
-            # Backward and optimize
-            loss.backward()
-            self.meta_optimizer.step()
-
-            # Calculate accuracy
-            pred = torch.argmax(query_logits, dim=1)
-            accuracy = (pred == query_y).float().mean().item()
-
-            total_loss += loss.item()
-            total_accuracy += accuracy
-
-        return total_loss / num_tasks, (total_accuracy / num_tasks) * 100
+        return meta_loss, meta_accuracy
 
     def validate(self, task_generator, num_tasks=100):
-        """Validate model"""
+        """Validate model with MAML++ approach"""
         self.model.eval()
         tasks = []
 
         # Generate validation tasks
         for _ in range(num_tasks):
-            support_x, support_y, query_x, query_y = task_generator.generate_task()
-            tasks.append((support_x, support_y, query_x, query_y))
+            try:
+                support_x, support_y, query_x, query_y = task_generator.generate_task()
+                tasks.append((support_x, support_y, query_x, query_y))
+            except Exception as e:
+                print(f"Error generating validation task: {e}")
+                continue
 
-        # Evaluation loop
-        total_loss = 0
-        total_accuracy = 0
+        if not tasks:
+            print("No valid tasks could be generated for validation")
+            return 0.0, 0.0
 
-        with torch.no_grad():
-            for support_x, support_y, query_x, query_y in tasks:
-                # Move to device
-                support_x, support_y = support_x.to(self.device), support_y.to(self.device)
-                query_x, query_y = query_x.to(self.device), query_y.to(self.device)
+        # Process tasks
+        meta_loss, meta_accuracy = self.outer_step(tasks, train=False)
 
-                # Process query set
-                batch_size, _, seq_len = query_x.shape
-                static_adj = prepare_static_adjacency(batch_size, seq_len, self.device)
-
-                logits, _ = self.model(query_x, static_adj)
-                loss = self.criterion(logits, query_y)
-
-                # Calculate accuracy
-                pred = torch.argmax(logits, dim=1)
-                accuracy = (pred == query_y).float().mean().item()
-
-                total_loss += loss.item()
-                total_accuracy += accuracy
-
-        return total_loss / num_tasks, (total_accuracy / num_tasks) * 100
+        return meta_loss, meta_accuracy
 
     def train(self, train_task_generator, val_task_generator, num_epochs=None):
-        """完整训练流程"""
+        """Full training procedure with MAML++ enhancements"""
         num_epochs = num_epochs or Config.max_epochs
 
         best_val_accuracy = 0.0
@@ -203,32 +252,37 @@ class MAMLTrainer:
         val_accs = []
 
         for epoch in range(num_epochs):
-            # 训练阶段
+            self.epoch = epoch  # Update current epoch for annealing
+
+            # Training phase
             train_loss, train_acc = self.train_epoch(train_task_generator)
             train_losses.append(train_loss)
             train_accs.append(train_acc)
 
-            # 验证阶段
+            # Validation phase
             val_loss, val_acc = self.validate(val_task_generator)
             val_losses.append(val_loss)
             val_accs.append(val_acc)
 
-            print(f"Epoch {epoch + 1}/{num_epochs}: Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, "
-                  f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%")
+            # Current learning rate
+            current_lr = self.meta_optimizer.param_groups[0]['lr']
 
-            # 保存最佳模型
+            print(f"Epoch {epoch + 1}/{num_epochs}: Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, "
+                  f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%, LR: {current_lr:.6f}")
+
+            # Save best model
             if val_acc > best_val_accuracy:
                 best_val_accuracy = val_acc
                 best_epoch = epoch
                 save_model(self.model, os.path.join(Config.save_dir, 'best_model.pth'))
                 print(f"New best model saved with validation accuracy: {best_val_accuracy:.2f}%")
 
-            # 早停检查
+            # Early stopping check
             if epoch - best_epoch >= Config.patience:
                 print(f"Early stopping triggered after {Config.patience} epochs without improvement")
                 break
 
-        # 加载最佳模型
+        # Load best model
         load_model(self.model, os.path.join(Config.save_dir, 'best_model.pth'))
 
         return {
@@ -242,7 +296,7 @@ class MAMLTrainer:
 
 
 def test_model(model, test_task_generator, device, num_tasks=None, shot=None):
-    """Test model with fine-tuning on each task"""
+    """Test model with MAML++ fine-tuning on each task"""
     num_tasks = num_tasks or Config.num_tasks
 
     # Save original k_shot and set new value if specified
@@ -260,32 +314,23 @@ def test_model(model, test_task_generator, device, num_tasks=None, shot=None):
             support_x, support_y = support_x.to(device), support_y.to(device)
             query_x, query_y = query_x.to(device), query_y.to(device)
 
-            # Fine-tune a copy of the model on the support set
-            adapted_model = copy.deepcopy(model)
-            adapted_model.train()
+            # Create a temporary training instance for this task
+            temp_trainer = MAMLPlusPlusTrainer(copy.deepcopy(model), device)
 
-            optimizer = torch.optim.SGD(adapted_model.parameters(), lr=Config.inner_lr)
-            criterion = nn.CrossEntropyLoss()
-
-            batch_size, channels, seq_len = support_x.shape
-            static_adj = prepare_static_adjacency(batch_size, seq_len, device)
-
-            # Fine-tuning steps
-            for _ in range(Config.inner_steps):
-                optimizer.zero_grad()
-                logits, _ = adapted_model(support_x, static_adj)
-                loss = criterion(logits, support_y)
-                loss.backward()
-                optimizer.step()
+            # Perform inner loop adaptation
+            updated_model, _, _, _ = temp_trainer.inner_loop(
+                support_x,
+                support_y,
+                create_graph=False
+            )
 
             # Evaluate on query set
-            adapted_model.eval()
             batch_size, channels, seq_len = query_x.shape
             static_adj = prepare_static_adjacency(batch_size, seq_len, device)
 
             with torch.no_grad():
-                logits, _ = adapted_model(query_x, static_adj)
-                pred = torch.argmax(logits, dim=1)
+                query_logits, _ = updated_model(query_x, static_adj)
+                pred = torch.argmax(query_logits, dim=1)
                 accuracy = (pred == query_y).float().mean().item()
                 all_accuracies.append(accuracy)
                 total_accuracy += accuracy
@@ -392,3 +437,7 @@ def noise_robustness_experiment(model, test_task_generator, device, noise_levels
     Config.augmentation = original_augmentation
 
     return noise_levels, results
+
+
+# Maintain backward compatibility
+MAMLTrainer = MAMLPlusPlusTrainer

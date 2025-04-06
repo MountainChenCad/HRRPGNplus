@@ -7,7 +7,7 @@ from config import Config
 from dataset import prepare_datasets, TaskGenerator, HRRPTransform
 from models import MDGN
 from train import (
-    MAMLTrainer, test_model, shot_experiment,
+    MAMLPlusPlusTrainer as MAMLTrainer, test_model, shot_experiment,
     ablation_study_lambda, ablation_study_dynamic_graph,
     noise_robustness_experiment
 )
