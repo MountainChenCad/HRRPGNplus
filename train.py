@@ -162,7 +162,7 @@ class MAMLPlusPlusTrainer:
                 query_loss = self.criterion(query_logits, query_y)
 
                 # Combined loss (support + query)
-                task_loss = 0.3 * support_loss + 0.7 * query_loss
+                task_loss = 0.3 * support_loss.detach() + 0.7 * query_loss
                 meta_loss += task_loss
 
                 # Compute accuracy
