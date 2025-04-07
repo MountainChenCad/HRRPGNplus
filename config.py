@@ -20,7 +20,7 @@ class Config:
 
     # 小样本学习配置
     n_way = 3  # N-way分类
-    k_shot = 10  # K-shot (支持集每类样本数)
+    k_shot = 5  # K-shot (支持集每类样本数)
     q_query = 15  # 查询集每类样本数
     num_tasks = 600  # 测试任务数量
 
@@ -47,7 +47,7 @@ class Config:
     inner_lr = 0.005  # 初始内循环学习率基准值
     outer_lr = 0.0005  # 初始外循环学习率
     inner_steps = 5  # 内循环更新步数
-    task_batch_size = 10  # 每批次任务数
+    task_batch_size = 4  # 每批次任务数
     max_epochs = 300  # 最大迭代轮次
     patience = 100  # 早停耐心值
 

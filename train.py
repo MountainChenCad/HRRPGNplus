@@ -218,7 +218,7 @@ class MAMLPlusPlusTrainer:
 
         return meta_loss, meta_accuracy
 
-    def validate(self, task_generator, num_tasks=10):
+    def validate(self, task_generator, num_tasks=4):
         """Validate model with MAML++ approach"""
         self.model.eval()
         tasks = []
@@ -360,7 +360,7 @@ def test_model(model, test_task_generator, device, num_tasks=None, shot=None):
 def shot_experiment(model, test_task_generator, device, shot_sizes=None):
     """不同shot下的性能实验"""
     if shot_sizes is None:
-        shot_sizes = [1, 2, 3, 5, 10, 20]
+        shot_sizes = [1, 4, 8, 16, 32]
 
     results = []
 
