@@ -112,6 +112,23 @@ class Config:
         os.makedirs(Config.save_dir, exist_ok=True)
 
     @classmethod
+    def load_experiment(cls, exp_id):
+        """Load configuration from a previous experiment"""
+        log_dir = f"logs/experiment_{exp_id}"
+        save_dir = f"checkpoints/experiment_{exp_id}"
+
+        if not os.path.exists(log_dir):
+            print(f"Error: Experiment directory not found: {log_dir}")
+            return False
+
+        # Update directories
+        cls.timestamp = exp_id
+        cls.log_dir = log_dir
+        cls.save_dir = save_dir
+        print(f"Loaded experiment {exp_id} configuration")
+        return True
+
+    @classmethod
     def get_current_scheme(cls):
         """获取当前交叉验证方案"""
         return cls.cross_validation_schemes[cls.current_scheme]

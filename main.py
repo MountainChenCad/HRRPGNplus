@@ -14,7 +14,7 @@ from train import (
 from utils import (
     plot_learning_curve, plot_shot_curve, plot_confusion_matrix,
     visualize_features, visualize_dynamic_graph, visualize_attention,
-    compute_metrics, log_metrics, create_experiment_log
+    compute_metrics, log_metrics, create_experiment_log, find_latest_experiment
 )
 
 
@@ -34,6 +34,10 @@ def parse_args():
                         help='Task batch size')
     parser.add_argument('--vis', action='store_true',
                         help='Enable visualization')
+    parser.add_argument('--exp_id', type=str, default=None,
+                        help='Experiment ID (timestamp) for loading a previous model')
+    parser.add_argument('--model_path', type=str, default=None,
+                        help='Direct path to model file to load')
     return parser.parse_args()
 
 
@@ -157,6 +161,19 @@ def train(args, vis=False):
 
 def test(args, model=None, vis=False):
     """测试模型"""
+    # Load experiment config if ID provided
+    if args.exp_id:
+        if not Config.load_experiment(args.exp_id):
+            print(f"Error: Could not load experiment {args.exp_id}")
+            return None
+    # Try to find latest experiment if no model passed directly
+    elif model is None:
+        latest_exp = find_latest_experiment()
+        if latest_exp:
+            Config.load_experiment(latest_exp)
+            print(f"Automatically loaded latest experiment: {latest_exp}")
+
+    """测试模型"""
     # 准备数据集
     _, test_dataset = prepare_datasets(scheme_idx=args.cv)
 
@@ -218,16 +235,22 @@ def test(args, model=None, vis=False):
     test_task_generator = TaskGenerator(test_dataset, n_way=Config.test_n_way, k_shot=Config.k_shot,
                                         q_query=Config.q_query)
 
-    # 加载模型
+    # Load model
     if model is None:
         model = MDGN(num_classes=Config.test_n_way)
         model = model.to(Config.device)
-        model_path = os.path.join(Config.save_dir, 'best_model.pth')
+
+        # Prioritize directly specified model path
+        if args.model_path and os.path.exists(args.model_path):
+            model_path = args.model_path
+        else:
+            model_path = os.path.join(Config.save_dir, 'best_model.pth')
+
         if os.path.exists(model_path):
             model.load_state_dict(torch.load(model_path))
-            print(f"已加载模型: {model_path}")
+            print(f"Loaded model: {model_path}")
         else:
-            print(f"未找到模型: {model_path}。请先训练模型。")
+            print(f"Model not found: {model_path}. Please train first or provide correct path.")
             return None
 
     # 执行标准测试
@@ -259,6 +282,19 @@ def test(args, model=None, vis=False):
 
 
 def run_ablation_studies(args):
+    """运行消融实验"""
+    # Load experiment config if ID provided
+    if args.exp_id:
+        if not Config.load_experiment(args.exp_id):
+            print(f"Error: Could not load experiment {args.exp_id}")
+            return
+    # Try to find latest experiment
+    else:
+        latest_exp = find_latest_experiment()
+        if latest_exp:
+            Config.load_experiment(latest_exp)
+            print(f"Automatically loaded latest experiment: {latest_exp}")
+
     """运行消融实验"""
     # 准备数据集
     _, test_dataset = prepare_datasets(scheme_idx=args.cv)
@@ -355,11 +391,12 @@ def run_ablation_studies(args):
 def main():
     args = parse_args()
 
-    # 设置随机种子
+    # Set random seed
     Config.set_seed()
 
-    # 创建必要的目录
-    Config.create_directories()
+    # Only create new directories in training mode
+    if args.mode == 'train':
+        Config.create_directories()
 
     try:
         # 根据模式执行

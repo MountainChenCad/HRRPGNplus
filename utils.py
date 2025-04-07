@@ -327,6 +327,20 @@ def log_gradient_norm(model, phase='train'):
     return total_norm
 
 
+def find_latest_experiment():
+    """Find the latest experiment ID"""
+    logs_dir = "logs"
+    if not os.path.exists(logs_dir):
+        return None
+
+    experiment_dirs = [d for d in os.listdir(logs_dir) if d.startswith("experiment_")]
+    if not experiment_dirs:
+        return None
+
+    # Sort by timestamp to get the latest
+    latest_exp = sorted(experiment_dirs, reverse=True)[0]
+    return latest_exp.replace("experiment_", "")
+
 def get_module_by_name(model, module_name):
     """Get a module from a model by its name"""
     names = module_name.split('.')
