@@ -49,7 +49,7 @@ class Config:
     inner_steps = 5  # 内循环更新步数
     task_batch_size = 4  # 每批次任务数
     max_epochs = 300  # 最大迭代轮次
-    patience = 100  # 早停耐心值
+    patience = 20  # 早停耐心值
 
     # MAML++ 多步骤损失权重
     # 按步骤递增的权重，越靠后的步骤权重越大
@@ -87,17 +87,119 @@ class Config:
     weight_decay = 0.01  # L2正则化系数
 
     # 数据增强配置
-    augmentation = False
+    augmentation = False  # 是否使用数据增强
     noise_levels = [20, 15, 10, 5, 0]  # SNR in dB
     occlusion_ratio = 0.1  # 随机遮挡比例
     phase_jitter = 0.1  # 相位抖动幅度
 
-    # 消融实验配置
+    # ==================== 实验配置 ====================
+
+    # 实验评估配置
+    evaluation_shots = [1, 5, 10, 20]  # N-way K-shot设置的K值
+    evaluation_ways = [3, 5]  # N-way K-shot设置的N值
+    evaluation_metrics = ['accuracy', 'f1_score', 'confusion_matrix']  # 评估指标
+
+    # 噪声鲁棒性实验配置
+    noise_robustness = {
+        'enabled': True,
+        'snr_levels': [20, 15, 10, 5, 0, -5],  # 信噪比水平 (dB)
+        'num_tasks': 100  # 每个信噪比水平测试的任务数
+    }
+
+    # 数据稀疏性实验配置
+    data_sparsity = {
+        'enabled': True,
+        'shot_levels': [1, 5, 10, 20],  # K-shot设置
+        'num_tasks': 100  # 每个shot水平测试的任务数
+    }
+
+    # ========== 消融实验配置 ==========
+
+    # 基本消融实验配置
     ablation = {
-        'dynamic_graph': True,
-        'maml': True,
-        'lambda_values': [0, 0.25, 0.5, 0.75, 1.0],
-        'inner_steps_values': [1, 3, 5, 10],
+        'dynamic_graph': True,  # 是否测试动态图模块
+        'maml': True,  # 是否测试元学习模块
+        'lambda_values': [0, 0.25, 0.5, 0.75, 1.0],  # 混合系数γ的值
+        'inner_steps_values': [1, 3, 5, 10],  # 内循环步数的值
+    }
+
+    # 图结构建模分析配置
+    graph_structure_ablation = {
+        'enabled': True,
+        'types': ['static', 'dynamic', 'hybrid'],  # 图结构类型
+        'lambda_values': [0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0],  # 混合系数γ的值
+        'visualization_enabled': True  # 是否启用邻接矩阵可视化
+    }
+
+    # GNN架构组件分析配置
+    gnn_architecture_ablation = {
+        'enabled': True,
+        'graph_conv_layers_values': [1, 2, 3, 4],  # 图卷积层数的值
+        'attention_heads_values': [2, 4, 8],  # 注意力头数的值
+        'pooling_strategies': ['attention', 'mean', 'max']  # 池化策略
+    }
+
+    # 元学习优化分析配置
+    meta_learning_ablation = {
+        'enabled': True,
+        'per_layer_lr_enabled': [True, False],  # 是否使用每层学习率
+        'per_step_lr_enabled': [True, False],  # 是否使用每步学习率
+        'multi_step_loss_enabled': [True, False],  # 是否使用多步损失
+        'second_order_enabled': [True, False]  # 是否使用二阶导数
+    }
+
+    # ========== 基线模型比较配置 ==========
+
+    # 传统雷达目标识别方法
+    traditional_baselines = {
+        'enabled': True,
+        'methods': ['PCA+SVM', 'Template Matching']
+    }
+
+    # 深度学习方法
+    dl_baselines = {
+        'enabled': True,
+        'methods': ['CNN', 'LSTM', 'GCN', 'GAT']
+    }
+
+    # 少样本学习方法
+    fsl_baselines = {
+        'enabled': True,
+        'methods': ['ProtoNet', 'MatchingNet']
+    }
+
+    # ========== 可视化与解释性分析配置 ==========
+
+    # 注意力机制可视化配置
+    attention_visualization = {
+        'enabled': True,
+        'num_samples': 5,  # 可视化样本数
+        'save_dir': 'visualizations/attention'  # 保存目录
+    }
+
+    # 动态图结构分析配置
+    dynamic_graph_visualization = {
+        'enabled': True,
+        'num_samples': 5,  # 可视化样本数
+        'save_dir': 'visualizations/dynamic_graph'  # 保存目录
+    }
+
+    # 特征空间可视化配置
+    feature_visualization = {
+        'enabled': True,
+        'method': 't-SNE',  # 降维方法
+        'perplexity': 30,  # t-SNE参数
+        'save_dir': 'visualizations/features'  # 保存目录
+    }
+
+    # ========== 计算复杂度分析配置 ==========
+
+    computational_complexity = {
+        'enabled': True,
+        'measure_inference_time': True,  # 是否测量推理时间
+        'measure_memory_usage': True,  # 是否测量内存使用
+        'measure_flops': True,  # 是否测量浮点运算数
+        'num_runs': 100  # 推理时间测量的运行次数
     }
 
     # 实验日志配置
@@ -110,6 +212,16 @@ class Config:
         """创建必要的目录"""
         os.makedirs(Config.log_dir, exist_ok=True)
         os.makedirs(Config.save_dir, exist_ok=True)
+
+        # 创建可视化目录
+        if Config.attention_visualization['enabled']:
+            os.makedirs(os.path.join(Config.log_dir, Config.attention_visualization['save_dir']), exist_ok=True)
+
+        if Config.dynamic_graph_visualization['enabled']:
+            os.makedirs(os.path.join(Config.log_dir, Config.dynamic_graph_visualization['save_dir']), exist_ok=True)
+
+        if Config.feature_visualization['enabled']:
+            os.makedirs(os.path.join(Config.log_dir, Config.feature_visualization['save_dir']), exist_ok=True)
 
     @classmethod
     def load_experiment(cls, exp_id):

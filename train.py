@@ -7,9 +7,20 @@ from tqdm import tqdm
 import os
 import copy
 import math
+import time
+import pandas as pd
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, f1_score, confusion_matrix
+import matplotlib.pyplot as plt
 from config import Config
-from models import MDGN
-from utils import prepare_static_adjacency, compute_metrics, log_metrics, save_model, load_model
+from models import (
+    MDGN, CNNModel, LSTMModel, GCNModel, GATModel,
+    ProtoNetModel, MatchingNetModel, PCASVM, TemplateMatcher,
+    StaticGraphModel, DynamicGraphModel, HybridGraphModel
+)
+from utils import (
+    prepare_static_adjacency, compute_metrics, log_metrics, save_model, load_model,
+    visualize_features, visualize_dynamic_graph, visualize_attention, plot_confusion_matrix
+)
 
 
 class MAMLPlusPlusTrainer:
@@ -309,6 +320,9 @@ def test_model(model, test_task_generator, device, num_tasks=None, shot=None):
     model.eval()
     total_accuracy = 0.0
     all_accuracies = []
+    all_f1_scores = []
+    all_preds = []
+    all_labels = []
 
     for task_idx in tqdm(range(num_tasks), desc="Testing"):
         try:
@@ -333,9 +347,19 @@ def test_model(model, test_task_generator, device, num_tasks=None, shot=None):
             with torch.no_grad():
                 query_logits, _ = updated_model(query_x, static_adj)
                 pred = torch.argmax(query_logits, dim=1)
+
+                # Collect predictions and labels
+                all_preds.extend(pred.cpu().numpy())
+                all_labels.extend(query_y.cpu().numpy())
+
+                # Calculate accuracy
                 accuracy = (pred == query_y).float().mean().item()
                 all_accuracies.append(accuracy)
                 total_accuracy += accuracy
+
+                # Calculate F1 score (macro)
+                f1 = f1_score(query_y.cpu().numpy(), pred.cpu().numpy(), average='macro')
+                all_f1_scores.append(f1)
 
         except Exception as e:
             print(f"Testing task {task_idx} error: {e}")
@@ -346,15 +370,31 @@ def test_model(model, test_task_generator, device, num_tasks=None, shot=None):
         test_task_generator.k_shot = original_k_shot
 
     if not all_accuracies:
-        return 0, 0, []
+        return 0, 0, [], 0
 
+    # Calculate overall metrics
     avg_accuracy = total_accuracy / len(all_accuracies)
     std_accuracy = np.std(all_accuracies)
     ci95 = 1.96 * std_accuracy / np.sqrt(len(all_accuracies))
+    avg_f1 = np.mean(all_f1_scores)
 
+    # Create confusion matrix
+    cm = confusion_matrix(all_labels, all_preds)
+
+    # Print detailed results
     print(f"Test Accuracy: {avg_accuracy * 100:.2f}% ± {ci95 * 100:.2f}%")
+    print(f"Test F1 Score (macro): {avg_f1 * 100:.2f}%")
 
-    return avg_accuracy * 100, ci95 * 100, all_accuracies
+    # Save confusion matrix
+    if not os.path.exists(Config.log_dir):
+        os.makedirs(Config.log_dir)
+    n_classes = len(np.unique(all_labels))
+    class_names = [f"Class {i}" for i in range(n_classes)]
+    plot_confusion_matrix(cm, class_names,
+                          title=f"{shot}-shot Confusion Matrix",
+                          save_path=os.path.join(Config.log_dir, f"confusion_matrix_{shot}shot.png"))
+
+    return avg_accuracy * 100, ci95 * 100, all_accuracies, avg_f1 * 100
 
 
 def shot_experiment(model, test_task_generator, device, shot_sizes=None):
@@ -363,79 +403,813 @@ def shot_experiment(model, test_task_generator, device, shot_sizes=None):
         shot_sizes = [1, 4, 8, 16, 32]
 
     results = []
+    ci_results = []  # 新增
+    f1_results = []  # 新增
 
     for shot in shot_sizes:
         print(f"\nTesting with {shot}-shot:")
-        accuracy, ci, _ = test_model(model, test_task_generator, device, num_tasks=100, shot=shot)
+        accuracy, ci, _, f1 = test_model(model, test_task_generator, device, num_tasks=100, shot=shot)
         results.append(accuracy)
-        print(f"{shot}-shot Accuracy: {accuracy:.2f}% ± {ci:.2f}%")
+        ci_results.append(ci)  # 新增
+        f1_results.append(f1)  # 新增
+        print(f"{shot}-shot Accuracy: {accuracy:.2f}% ± {ci:.2f}%, F1: {f1:.2f}%")
 
-    return shot_sizes, results
+    return shot_sizes, results, ci_results, f1_results  # 修改为返回4个值
 
 
 def ablation_study_lambda(model, test_task_generator, device, lambda_values=None):
-    """lambda混合比例的消融实验"""
+    """Lambda mixing coefficient ablation experiment"""
     if lambda_values is None:
         lambda_values = Config.ablation['lambda_values']
 
     results = []
+    ci_results = []
+    f1_results = []
     original_lambda = Config.lambda_mix
+
+    # Create results directory
+    results_dir = os.path.join(Config.log_dir, 'lambda_ablation')
+    os.makedirs(results_dir, exist_ok=True)
+
+    # Save results in DataFrame
+    results_data = []
 
     for lambda_val in lambda_values:
         print(f"\nTesting with lambda={lambda_val}:")
         Config.lambda_mix = lambda_val
-        accuracy, ci, _ = test_model(model, test_task_generator, device, num_tasks=100)
+        accuracy, ci, _, f1 = test_model(model, test_task_generator, device, num_tasks=100)
         results.append(accuracy)
-        print(f"Lambda={lambda_val} Accuracy: {accuracy:.2f}% ± {ci:.2f}%")
+        ci_results.append(ci)
+        f1_results.append(f1)
+        print(f"Lambda={lambda_val} Accuracy: {accuracy:.2f}% ± {ci:.2f}%, F1: {f1:.2f}%")
 
-    # 恢复原始lambda值
+        # Add to results data
+        results_data.append({
+            'Lambda': lambda_val,
+            'Accuracy': accuracy,
+            'CI': ci,
+            'F1': f1
+        })
+
+    # Restore original lambda value
     Config.lambda_mix = original_lambda
+
+    # Save results to CSV
+    results_df = pd.DataFrame(results_data)
+    results_df.to_csv(os.path.join(results_dir, 'lambda_ablation_results.csv'), index=False)
+
+    # Plot results with error bars
+    plt.figure(figsize=(10, 6))
+    plt.errorbar(lambda_values, results, yerr=ci_results, fmt='o-', capsize=5, label='Accuracy')
+    plt.plot(lambda_values, f1_results, 's--', label='F1 Score')
+    plt.title('Performance vs Lambda Mixing Coefficient')
+    plt.xlabel('Lambda (Static Graph Weight)')
+    plt.ylabel('Performance (%)')
+    plt.grid(True)
+    plt.legend()
+    plt.savefig(os.path.join(results_dir, 'lambda_ablation_plot.png'), dpi=300, bbox_inches='tight')
+    plt.close()
 
     return lambda_values, results
 
 
 def ablation_study_dynamic_graph(model, test_task_generator, device):
-    """动态图vs静态图消融实验"""
+    """Dynamic vs static graph ablation experiment"""
     results = []
-    labels = ["Static Graph", "Dynamic Graph"]
+    ci_results = []
+    f1_results = []
+    labels = ["Static Graph", "Dynamic Graph", "Hybrid Graph"]
 
-    # 测试静态图
+    # Create results directory
+    results_dir = os.path.join(Config.log_dir, 'graph_structure_ablation')
+    os.makedirs(results_dir, exist_ok=True)
+
+    # Save original config
     original_use_dynamic = Config.use_dynamic_graph
+    original_lambda = Config.lambda_mix
+
+    # Save results in DataFrame
+    results_data = []
+
+    # Test static graph
+    print("\nTesting with static graph:")
     Config.use_dynamic_graph = False
-    accuracy_static, ci_static, _ = test_model(model, test_task_generator, device, num_tasks=100)
+    accuracy_static, ci_static, _, f1_static = test_model(model, test_task_generator, device, num_tasks=100)
     results.append(accuracy_static)
-    print(f"Static Graph Accuracy: {accuracy_static:.2f}% ± {ci_static:.2f}%")
+    ci_results.append(ci_static)
+    f1_results.append(f1_static)
+    print(f"Static Graph Accuracy: {accuracy_static:.2f}% ± {ci_static:.2f}%, F1: {f1_static:.2f}%")
+    results_data.append({
+        'Graph Type': 'Static',
+        'Accuracy': accuracy_static,
+        'CI': ci_static,
+        'F1': f1_static
+    })
 
-    # 测试动态图
+    # Test dynamic graph (pure)
+    print("\nTesting with pure dynamic graph:")
     Config.use_dynamic_graph = True
-    accuracy_dynamic, ci_dynamic, _ = test_model(model, test_task_generator, device, num_tasks=100)
+    Config.lambda_mix = 0.0  # Pure dynamic
+    accuracy_dynamic, ci_dynamic, _, f1_dynamic = test_model(model, test_task_generator, device, num_tasks=100)
     results.append(accuracy_dynamic)
-    print(f"Dynamic Graph Accuracy: {accuracy_dynamic:.2f}% ± {ci_dynamic:.2f}%")
+    ci_results.append(ci_dynamic)
+    f1_results.append(f1_dynamic)
+    print(f"Dynamic Graph Accuracy: {accuracy_dynamic:.2f}% ± {ci_dynamic:.2f}%, F1: {f1_dynamic:.2f}%")
+    results_data.append({
+        'Graph Type': 'Dynamic',
+        'Accuracy': accuracy_dynamic,
+        'CI': ci_dynamic,
+        'F1': f1_dynamic
+    })
 
-    # 恢复原始设置
+    # Test hybrid graph
+    print("\nTesting with hybrid graph:")
+    Config.use_dynamic_graph = True
+    Config.lambda_mix = 0.5  # Equal mix
+    accuracy_hybrid, ci_hybrid, _, f1_hybrid = test_model(model, test_task_generator, device, num_tasks=100)
+    results.append(accuracy_hybrid)
+    ci_results.append(ci_hybrid)
+    f1_results.append(f1_hybrid)
+    print(f"Hybrid Graph Accuracy: {accuracy_hybrid:.2f}% ± {ci_hybrid:.2f}%, F1: {f1_hybrid:.2f}%")
+    results_data.append({
+        'Graph Type': 'Hybrid',
+        'Accuracy': accuracy_hybrid,
+        'CI': ci_hybrid,
+        'F1': f1_hybrid
+    })
+
+    # Restore original settings
     Config.use_dynamic_graph = original_use_dynamic
+    Config.lambda_mix = original_lambda
+
+    # Save results to CSV
+    results_df = pd.DataFrame(results_data)
+    results_df.to_csv(os.path.join(results_dir, 'graph_structure_results.csv'), index=False)
+
+    # Plot results with error bars
+    plt.figure(figsize=(10, 6))
+    x_pos = np.arange(len(labels))
+
+    # Plot accuracy bars
+    plt.bar(x_pos - 0.2, results, width=0.4, yerr=ci_results, capsize=5, label='Accuracy', color='blue', alpha=0.7)
+
+    # Plot F1 bars
+    plt.bar(x_pos + 0.2, f1_results, width=0.4, label='F1 Score', color='green', alpha=0.7)
+
+    plt.xticks(x_pos, labels)
+    plt.title('Performance Comparison: Graph Structure Types')
+    plt.ylabel('Performance (%)')
+    plt.grid(axis='y')
+    plt.legend()
+
+    plt.savefig(os.path.join(results_dir, 'graph_structure_plot.png'), dpi=300, bbox_inches='tight')
+    plt.close()
 
     return labels, results
 
 
+def ablation_study_gnn_architecture(model, test_task_generator, device):
+    """GNN architecture components ablation study"""
+    # Create results directory
+    results_dir = os.path.join(Config.log_dir, 'gnn_architecture_ablation')
+    os.makedirs(results_dir, exist_ok=True)
+
+    # Save original config
+    original_heads = Config.attention_heads
+    original_layers = Config.graph_conv_layers
+
+    # Test different attention heads
+    head_values = [2, 4, 8]
+    head_results = []
+    head_ci = []
+    head_f1 = []
+
+    print("\nTesting different attention head configurations:")
+    for heads in head_values:
+        # Update config
+        Config.attention_heads = heads
+
+        # Reinitialize model with new config
+        temp_model = MDGN(num_classes=model.encoder.fc.out_features).to(device)
+        # Load pre-trained weights where possible
+        try:
+            temp_model.load_state_dict(model.state_dict())
+        except:
+            print(f"Warning: Could not load pre-trained weights for heads={heads} model")
+
+        # Test model
+        print(f"\nTesting with {heads} attention heads:")
+        accuracy, ci, _, f1 = test_model(temp_model, test_task_generator, device, num_tasks=50)
+        head_results.append(accuracy)
+        head_ci.append(ci)
+        head_f1.append(f1)
+        print(f"{heads} Attention Heads: Accuracy: {accuracy:.2f}% ± {ci:.2f}%, F1: {f1:.2f}%")
+
+    # Test different graph convolution layers
+    layer_values = [1, 2, 3, 4]
+    layer_results = []
+    layer_ci = []
+    layer_f1 = []
+
+    print("\nTesting different graph convolution layer configurations:")
+    for layers in layer_values:
+        # Update config
+        Config.graph_conv_layers = layers
+
+        # Reinitialize model with new config
+        temp_model = MDGN(num_classes=model.encoder.fc.out_features).to(device)
+        # Note: Cannot load pre-trained weights due to architecture difference
+
+        # Test model
+        print(f"\nTesting with {layers} graph convolution layers:")
+        accuracy, ci, _, f1 = test_model(temp_model, test_task_generator, device, num_tasks=50)
+        layer_results.append(accuracy)
+        layer_ci.append(ci)
+        layer_f1.append(f1)
+        print(f"{layers} Graph Conv Layers: Accuracy: {accuracy:.2f}% ± {ci:.2f}%, F1: {f1:.2f}%")
+
+    # Restore original config
+    Config.attention_heads = original_heads
+    Config.graph_conv_layers = original_layers
+
+    # Save results
+    heads_df = pd.DataFrame({
+        'Heads': head_values,
+        'Accuracy': head_results,
+        'CI': head_ci,
+        'F1': head_f1
+    })
+
+    layers_df = pd.DataFrame({
+        'Layers': layer_values,
+        'Accuracy': layer_results,
+        'CI': layer_ci,
+        'F1': layer_f1
+    })
+
+    heads_df.to_csv(os.path.join(results_dir, 'attention_heads_results.csv'), index=False)
+    layers_df.to_csv(os.path.join(results_dir, 'conv_layers_results.csv'), index=False)
+
+    # Plot results
+    plt.figure(figsize=(12, 5))
+
+    # Plot attention heads results
+    plt.subplot(1, 2, 1)
+    plt.errorbar(head_values, head_results, yerr=head_ci, fmt='o-', capsize=5, label='Accuracy')
+    plt.plot(head_values, head_f1, 's--', label='F1 Score')
+    plt.title('Performance vs Attention Heads')
+    plt.xlabel('Number of Attention Heads')
+    plt.ylabel('Performance (%)')
+    plt.grid(True)
+    plt.legend()
+
+    # Plot graph conv layers results
+    plt.subplot(1, 2, 2)
+    plt.errorbar(layer_values, layer_results, yerr=layer_ci, fmt='o-', capsize=5, label='Accuracy')
+    plt.plot(layer_values, layer_f1, 's--', label='F1 Score')
+    plt.title('Performance vs Graph Conv Layers')
+    plt.xlabel('Number of Graph Conv Layers')
+    plt.ylabel('Performance (%)')
+    plt.grid(True)
+    plt.legend()
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(results_dir, 'gnn_architecture_ablation.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+
+    return {
+        'head_values': head_values,
+        'head_results': head_results,
+        'layer_values': layer_values,
+        'layer_results': layer_results
+    }
+
+
 def noise_robustness_experiment(model, test_task_generator, device, noise_levels=None):
-    """噪声鲁棒性实验"""
+    """Noise robustness experiment"""
     if noise_levels is None:
         noise_levels = Config.noise_levels
 
     results = []
-    # 保存原始噪声设置
+    ci_results = []
+    f1_results = []
+
+    # Create results directory
+    results_dir = os.path.join(Config.log_dir, 'noise_robustness')
+    os.makedirs(results_dir, exist_ok=True)
+
+    # Save original settings
     original_augmentation = Config.augmentation
+    original_noise_levels = Config.noise_levels.copy() if hasattr(Config.noise_levels, 'copy') else Config.noise_levels
+
+    # Enable augmentation
     Config.augmentation = True
+
+    # Save results in DataFrame
+    results_data = []
 
     for snr in noise_levels:
         print(f"\nTesting with SNR={snr}dB:")
-        Config.noise_levels = [snr]  # 设置为单一噪声水平
-        accuracy, ci, _ = test_model(model, test_task_generator, device, num_tasks=100)
+        Config.noise_levels = [snr]  # Set single noise level
+        accuracy, ci, _, f1 = test_model(model, test_task_generator, device, num_tasks=100)
         results.append(accuracy)
-        print(f"SNR={snr}dB Accuracy: {accuracy:.2f}% ± {ci:.2f}%")
+        ci_results.append(ci)
+        f1_results.append(f1)
+        print(f"SNR={snr}dB Accuracy: {accuracy:.2f}% ± {ci:.2f}%, F1: {f1:.2f}%")
 
-    # 恢复原始设置
+        # Add to results data
+        results_data.append({
+            'SNR': snr,
+            'Accuracy': accuracy,
+            'CI': ci,
+            'F1': f1
+        })
+
+    # Restore original settings
     Config.augmentation = original_augmentation
+    Config.noise_levels = original_noise_levels
+
+    # Save results to CSV
+    results_df = pd.DataFrame(results_data)
+    results_df.to_csv(os.path.join(results_dir, 'noise_robustness_results.csv'), index=False)
+
+    # Plot results with error bars
+    plt.figure(figsize=(10, 6))
+    plt.errorbar(noise_levels, results, yerr=ci_results, fmt='o-', capsize=5, label='Accuracy')
+    plt.plot(noise_levels, f1_results, 's--', label='F1 Score')
+    plt.title('Performance vs Signal-to-Noise Ratio (SNR)')
+    plt.xlabel('SNR (dB)')
+    plt.ylabel('Performance (%)')
+    plt.grid(True)
+    plt.legend()
+    plt.savefig(os.path.join(results_dir, 'noise_robustness_plot.png'), dpi=300, bbox_inches='tight')
+    plt.close()
 
     return noise_levels, results
+
+
+def compare_with_baselines(test_task_generator, device, shot=5):
+    """Compare HRRPGraphNet++ with baseline methods"""
+    # Create results directory
+    results_dir = os.path.join(Config.log_dir, 'baseline_comparison')
+    os.makedirs(results_dir, exist_ok=True)
+
+    # Set shot value for all experiments
+    original_k_shot = test_task_generator.k_shot
+    test_task_generator.k_shot = shot
+
+    # Define models to compare
+    num_classes = Config.test_n_way
+    models = {
+        'HRRPGraphNet++': MDGN(num_classes=num_classes).to(device),
+        'Static Graph': StaticGraphModel(num_classes=num_classes).to(device),
+        'Dynamic Graph': DynamicGraphModel(num_classes=num_classes).to(device),
+        'CNN': CNNModel(num_classes=num_classes).to(device),
+        'LSTM': LSTMModel(num_classes=num_classes).to(device),
+        'GCN': GCNModel(num_classes=num_classes).to(device),
+        'GAT': GATModel(num_classes=num_classes).to(device)
+    }
+
+    # Non-neural models (handle separately)
+    non_neural_models = ['PCA+SVM', 'Template Matching']
+
+    # Results storage
+    results = []
+    ci_results = []
+    f1_results = []
+    model_names = []
+    results_data = []
+
+    # Test each model
+    for model_name, model in models.items():
+        print(f"\nTesting {model_name}:")
+
+        # Load best weights if available (for HRRPGraphNet++)
+        if model_name == 'HRRPGraphNet++':
+            best_model_path = os.path.join(Config.save_dir, 'best_model.pth')
+            if os.path.exists(best_model_path):
+                try:
+                    model.load_state_dict(torch.load(best_model_path))
+                    print(f"Loaded best model weights for {model_name}")
+                except Exception as e:
+                    print(f"Could not load weights: {e}")
+
+        # Test model
+        accuracy, ci, _, f1 = test_model(model, test_task_generator, device, num_tasks=100)
+
+        # Store results
+        model_names.append(model_name)
+        results.append(accuracy)
+        ci_results.append(ci)
+        f1_results.append(f1)
+
+        print(f"{model_name}: Accuracy: {accuracy:.2f}% ± {ci:.2f}%, F1: {f1:.2f}%")
+        results_data.append({
+            'Model': model_name,
+            'Accuracy': accuracy,
+            'CI': ci,
+            'F1': f1
+        })
+
+    # Test non-neural models
+    # Generate a fixed set of tasks for fair comparison
+    all_tasks = []
+    for _ in range(100):
+        try:
+            task = test_task_generator.generate_task()
+            all_tasks.append(task)
+        except Exception as e:
+            print(f"Error generating task: {e}")
+            continue
+
+    # PCA+SVM
+    print("\nTesting PCA+SVM:")
+    pca_svm_accuracies = []
+    pca_svm_f1s = []
+
+    for task_idx, (support_x, support_y, query_x, query_y) in enumerate(all_tasks):
+        try:
+            # Convert to numpy
+            support_x_np = support_x.reshape(support_x.shape[0], -1).numpy()
+            support_y_np = support_y.numpy()
+            query_x_np = query_x.reshape(query_x.shape[0], -1).numpy()
+            query_y_np = query_y.numpy()
+
+            # Train PCA+SVM
+            pca_svm = PCASVM(n_components=min(50, support_x_np.shape[1]))
+            pca_svm.fit(support_x_np, support_y_np)
+
+            # Test
+            preds = pca_svm.predict(query_x_np)
+            accuracy = accuracy_score(query_y_np, preds)
+            f1 = f1_score(query_y_np, preds, average='macro')
+
+            pca_svm_accuracies.append(accuracy)
+            pca_svm_f1s.append(f1)
+
+        except Exception as e:
+            print(f"Error in PCA+SVM task {task_idx}: {e}")
+            continue
+
+    if pca_svm_accuracies:
+        pca_svm_acc = np.mean(pca_svm_accuracies) * 100
+        pca_svm_ci = 1.96 * np.std(pca_svm_accuracies) * 100 / np.sqrt(len(pca_svm_accuracies))
+        pca_svm_f1 = np.mean(pca_svm_f1s) * 100
+
+        model_names.append('PCA+SVM')
+        results.append(pca_svm_acc)
+        ci_results.append(pca_svm_ci)
+        f1_results.append(pca_svm_f1)
+
+        print(f"PCA+SVM: Accuracy: {pca_svm_acc:.2f}% ± {pca_svm_ci:.2f}%, F1: {pca_svm_f1:.2f}%")
+        results_data.append({
+            'Model': 'PCA+SVM',
+            'Accuracy': pca_svm_acc,
+            'CI': pca_svm_ci,
+            'F1': pca_svm_f1
+        })
+
+    # Template Matching
+    print("\nTesting Template Matching:")
+    tm_accuracies = []
+    tm_f1s = []
+
+    for task_idx, (support_x, support_y, query_x, query_y) in enumerate(all_tasks):
+        try:
+            # Convert to numpy
+            support_x_np = support_x.reshape(support_x.shape[0], -1).numpy()
+            support_y_np = support_y.numpy()
+            query_x_np = query_x.reshape(query_x.shape[0], -1).numpy()
+            query_y_np = query_y.numpy()
+
+            # Train Template Matcher
+            tm = TemplateMatcher(metric='correlation')
+            tm.fit(support_x_np, support_y_np)
+
+            # Test
+            preds = tm.predict(query_x_np)
+            accuracy = accuracy_score(query_y_np, preds)
+            f1 = f1_score(query_y_np, preds, average='macro')
+
+            tm_accuracies.append(accuracy)
+            tm_f1s.append(f1)
+
+        except Exception as e:
+            print(f"Error in Template Matching task {task_idx}: {e}")
+            continue
+
+    if tm_accuracies:
+        tm_acc = np.mean(tm_accuracies) * 100
+        tm_ci = 1.96 * np.std(tm_accuracies) * 100 / np.sqrt(len(tm_accuracies))
+        tm_f1 = np.mean(tm_f1s) * 100
+
+        model_names.append('Template Matching')
+        results.append(tm_acc)
+        ci_results.append(tm_ci)
+        f1_results.append(tm_f1)
+
+        print(f"Template Matching: Accuracy: {tm_acc:.2f}% ± {tm_ci:.2f}%, F1: {tm_f1:.2f}%")
+        results_data.append({
+            'Model': 'Template Matching',
+            'Accuracy': tm_acc,
+            'CI': tm_ci,
+            'F1': tm_f1
+        })
+
+    # Restore original shot value
+    test_task_generator.k_shot = original_k_shot
+
+    # Save results to CSV
+    results_df = pd.DataFrame(results_data)
+    results_df.to_csv(os.path.join(results_dir, f'baseline_comparison_{shot}shot.csv'), index=False)
+
+    # Plot results
+    plt.figure(figsize=(12, 8))
+
+    # Sort results for better visualization
+    sorted_indices = np.argsort(results)[::-1]  # Descending order
+    sorted_names = [model_names[i] for i in sorted_indices]
+    sorted_results = [results[i] for i in sorted_indices]
+    sorted_ci = [ci_results[i] for i in sorted_indices]
+    sorted_f1 = [f1_results[i] for i in sorted_indices]
+
+    x_pos = np.arange(len(sorted_names))
+
+    # Plot accuracy bars
+    plt.bar(x_pos - 0.2, sorted_results, width=0.4, yerr=sorted_ci, capsize=5, label='Accuracy', color='blue',
+            alpha=0.7)
+
+    # Plot F1 bars
+    plt.bar(x_pos + 0.2, sorted_f1, width=0.4, label='F1 Score', color='green', alpha=0.7)
+
+    plt.xticks(x_pos, sorted_names, rotation=45, ha='right')
+    plt.title(f'Model Comparison ({shot}-shot)')
+    plt.ylabel('Performance (%)')
+    plt.ylim(0, 100)
+    plt.grid(axis='y')
+    plt.legend()
+    plt.tight_layout()
+
+    plt.savefig(os.path.join(results_dir, f'baseline_comparison_{shot}shot.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+
+    return results_df
+
+
+def visualize_model_interpretability(model, test_task_generator, device):
+    """Generate visualizations for model interpretability"""
+    # Create visualization directory
+    vis_dir = os.path.join(Config.log_dir, 'visualizations')
+    os.makedirs(vis_dir, exist_ok=True)
+
+    # Generate a few tasks for visualization
+    num_vis_tasks = 5
+    visualization_tasks = []
+
+    print("\nGenerating tasks for visualization:")
+    for _ in range(num_vis_tasks):
+        try:
+            task = test_task_generator.generate_task()
+            visualization_tasks.append(task)
+        except Exception as e:
+            print(f"Error generating visualization task: {e}")
+            continue
+
+    if not visualization_tasks:
+        print("No valid tasks could be generated for visualization")
+        return
+
+    for task_idx, (support_x, support_y, query_x, query_y) in enumerate(visualization_tasks):
+        print(f"\nVisualizing task {task_idx + 1}:")
+        task_dir = os.path.join(vis_dir, f'task_{task_idx + 1}')
+        os.makedirs(task_dir, exist_ok=True)
+
+        # Copy data to device
+        support_x, support_y = support_x.to(device), support_y.to(device)
+        query_x, query_y = query_x.to(device), query_y.to(device)
+
+        # Fine-tune model on support set
+        temp_trainer = MAMLPlusPlusTrainer(copy.deepcopy(model), device)
+        updated_model, _, _, _ = temp_trainer.inner_loop(support_x, support_y, create_graph=False)
+
+        # 1. Visualize attention weights
+        print("  Visualizing attention weights...")
+        batch_size, channels, seq_len = query_x.shape
+        static_adj = prepare_static_adjacency(batch_size, seq_len, device)
+
+        for i in range(min(5, batch_size)):  # Visualize first 5 samples
+            sample_x = query_x[i:i + 1]
+            sample_y = query_y[i:i + 1]
+
+            # Forward pass with attention extraction
+            logits, features, adj_matrix, attention_weights = updated_model(
+                sample_x, static_adj, return_features=True, extract_attention=True
+            )
+
+            pred = torch.argmax(logits, dim=1).cpu().numpy()[0]
+            true_label = sample_y.cpu().numpy()[0]
+
+            # Visualize attention weights
+            visualize_attention(
+                sample_x.cpu(),
+                attention_weights.cpu(),
+                title=f'Sample {i + 1}: True: {true_label}, Pred: {pred}',
+                save_path=os.path.join(task_dir, f'attention_sample_{i + 1}.png')
+            )
+
+        # 2. Visualize dynamic graph structure
+        print("  Visualizing dynamic graph structure...")
+        # Get a random sample from query set
+        sample_idx = np.random.randint(0, batch_size)
+        sample_x = query_x[sample_idx:sample_idx + 1]
+
+        # Forward pass to get adjacency matrix
+        _, adj_matrix = updated_model(sample_x, static_adj)
+
+        # Visualize adjacency matrix
+        visualize_dynamic_graph(
+            adj_matrix[0].cpu(),  # First sample in batch
+            save_path=os.path.join(task_dir, 'dynamic_graph_structure.png')
+        )
+
+        # 3. Visualize feature space
+        print("  Visualizing feature space...")
+        # Extract features for all query samples
+        batch_features = []
+        batch_labels = []
+
+        for i in range(batch_size):
+            sample_x = query_x[i:i + 1]
+            sample_y = query_y[i:i + 1]
+
+            # Forward pass to extract features
+            _, features = updated_model(sample_x, static_adj, return_features=True)[0:2]
+
+            batch_features.append(features.cpu().numpy())
+            batch_labels.append(sample_y.cpu().numpy()[0])
+
+        # Stack features and visualize
+        batch_features = np.vstack(batch_features)
+        batch_labels = np.array(batch_labels)
+
+        visualize_features(
+            batch_features,
+            batch_labels,
+            title='t-SNE Feature Visualization',
+            save_path=os.path.join(task_dir, 'feature_space.png')
+        )
+
+    print(f"\nAll visualizations saved to {vis_dir}")
+
+
+def computational_complexity_analysis(model, test_task_generator, device):
+    """Analyze computational complexity of the model"""
+    # Create results directory
+    results_dir = os.path.join(Config.log_dir, 'computational_complexity')
+    os.makedirs(results_dir, exist_ok=True)
+
+    # Generate a sample task for timing
+    support_x, support_y, query_x, query_y = test_task_generator.generate_task()
+    support_x, support_y = support_x.to(device), support_y.to(device)
+    query_x, query_y = query_x.to(device), query_y.to(device)
+
+    batch_size, channels, seq_len = query_x.shape
+    static_adj = prepare_static_adjacency(batch_size, seq_len, device)
+
+    # Define models to compare
+    num_classes = Config.test_n_way
+    models = {
+        'HRRPGraphNet++': MDGN(num_classes=num_classes).to(device),
+        'CNN': CNNModel(num_classes=num_classes).to(device),
+        'LSTM': LSTMModel(num_classes=num_classes).to(device),
+        'GCN': GCNModel(num_classes=num_classes).to(device),
+        'GAT': GATModel(num_classes=num_classes).to(device)
+    }
+
+    # Count parameters
+    param_counts = {}
+    for name, model_instance in models.items():
+        param_count = sum(p.numel() for p in model_instance.parameters())
+        param_counts[name] = param_count
+        print(f"{name} parameter count: {param_count:,}")
+
+    # Measure inference time
+    inference_times = {}
+    num_runs = 100
+
+    for name, model_instance in models.items():
+        model_instance.eval()
+
+        # Warm-up
+        with torch.no_grad():
+            if name in ['HRRPGraphNet++', 'GCN']:
+                _ = model_instance(query_x, static_adj)
+            else:
+                _ = model_instance(query_x)
+
+        # Timing runs
+        torch.cuda.synchronize() if device.type == 'cuda' else None
+        start_time = time.time()
+
+        for _ in range(num_runs):
+            with torch.no_grad():
+                if name in ['HRRPGraphNet++', 'GCN']:
+                    _ = model_instance(query_x, static_adj)
+                else:
+                    _ = model_instance(query_x)
+
+        torch.cuda.synchronize() if device.type == 'cuda' else None
+        end_time = time.time()
+
+        avg_time = (end_time - start_time) * 1000 / num_runs  # ms
+        inference_times[name] = avg_time
+        print(f"{name} average inference time: {avg_time:.2f} ms")
+
+    # Measure training (adaptation) time
+    adaptation_times = {}
+
+    for name, model_instance in models.items():
+        # Only measure for models with MAML adaptation
+        if name == 'HRRPGraphNet++':
+            # Clone model for adaptation
+            clone_model = copy.deepcopy(model_instance)
+
+            # Warm-up
+            temp_trainer = MAMLPlusPlusTrainer(clone_model, device)
+            _ = temp_trainer.inner_loop(support_x, support_y, create_graph=False)
+
+            # Timing runs
+            torch.cuda.synchronize() if device.type == 'cuda' else None
+            start_time = time.time()
+
+            for _ in range(5):  # Fewer runs due to higher computational cost
+                clone_model = copy.deepcopy(model_instance)
+                temp_trainer = MAMLPlusPlusTrainer(clone_model, device)
+                _ = temp_trainer.inner_loop(support_x, support_y, create_graph=False)
+
+            torch.cuda.synchronize() if device.type == 'cuda' else None
+            end_time = time.time()
+
+            avg_time = (end_time - start_time) * 1000 / 5  # ms
+            adaptation_times[name] = avg_time
+            print(f"{name} average adaptation time: {avg_time:.2f} ms")
+
+    # Save results to CSV
+    results_df = pd.DataFrame({
+        'Model': list(param_counts.keys()),
+        'Parameters': list(param_counts.values()),
+        'Inference Time (ms)': [inference_times.get(model, float('nan')) for model in param_counts.keys()],
+        'Adaptation Time (ms)': [adaptation_times.get(model, float('nan')) for model in param_counts.keys()]
+    })
+
+    results_df.to_csv(os.path.join(results_dir, 'computational_complexity.csv'), index=False)
+
+    # Create bar charts
+    plt.figure(figsize=(15, 10))
+
+    # Parameter count subplot
+    plt.subplot(2, 2, 1)
+    models_list = list(param_counts.keys())
+    params_list = list(param_counts.values())
+
+    plt.bar(models_list, params_list)
+    plt.title('Model Parameter Count')
+    plt.ylabel('Number of Parameters')
+    plt.xticks(rotation=45, ha='right')
+    plt.grid(axis='y')
+
+    # Inference time subplot
+    plt.subplot(2, 2, 2)
+    inf_times = [inference_times.get(model, 0) for model in models_list]
+
+    plt.bar(models_list, inf_times)
+    plt.title('Inference Time')
+    plt.ylabel('Time (ms)')
+    plt.xticks(rotation=45, ha='right')
+    plt.grid(axis='y')
+
+    # Adaptation time subplot (only for applicable models)
+    plt.subplot(2, 2, 3)
+    adapt_models = [model for model in models_list if model in adaptation_times]
+    adapt_times = [adaptation_times[model] for model in adapt_models]
+
+    plt.bar(adapt_models, adapt_times)
+    plt.title('Adaptation Time (MAML)')
+    plt.ylabel('Time (ms)')
+    plt.xticks(rotation=45, ha='right')
+    plt.grid(axis='y')
+
+    # Log scale parameter count
+    plt.subplot(2, 2, 4)
+    plt.bar(models_list, params_list)
+    plt.title('Model Parameter Count (Log Scale)')
+    plt.ylabel('Number of Parameters')
+    plt.yscale('log')
+    plt.xticks(rotation=45, ha='right')
+    plt.grid(axis='y')
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(results_dir, 'computational_complexity.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+
+    return results_df

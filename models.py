@@ -3,6 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.init import xavier_uniform_, orthogonal_, zeros_, kaiming_normal_
 from config import Config
+from sklearn.decomposition import PCA
+from sklearn.svm import SVC
+import numpy as np
 
 
 class GraphAttention(nn.Module):
@@ -171,7 +174,7 @@ class DynamicGraphGenerator(nn.Module):
             return x_enhanced, static_adj
 
         if static_adj is not None:
-            # Mix static and dynamic adjacency matrices with random perturbation
+            # Mix static and dynamic adjacency matrices with lambda coefficient
             dynamic_lambda = max(0.1, min(0.9, self.lambda_mix))
             dynamic_adj = dynamic_lambda * static_adj + (1 - dynamic_lambda) * attn_adj
         else:
@@ -261,6 +264,9 @@ class GlobalAttentionPooling(nn.Module):
         weighted_x = x_t * attn_weight  # [batch_size, seq_len, in_channels]
         pooled = torch.sum(weighted_x, dim=1)  # [batch_size, in_channels]
 
+        # Store attention weights for visualization
+        self.last_attention_weights = attn_weight
+
         return pooled
 
 
@@ -308,7 +314,7 @@ class HRRPGraphNet(nn.Module):
         # Dropout
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, static_adj=None, return_features=False):
+    def forward(self, x, static_adj=None, return_features=False, extract_attention=False):
         """
         Input: x [batch_size, 1, seq_len]
               static_adj [batch_size, seq_len, seq_len] optional
@@ -329,9 +335,14 @@ class HRRPGraphNet(nn.Module):
         # Graph pooling
         h_pooled = self.pooling(h)
 
-        # Return features if requested
+        # Extract attention weights for visualization if requested
+        attention_weights = None
+        if extract_attention:
+            attention_weights = self.pooling.last_attention_weights
+
+        # Return features and attention if requested
         if return_features:
-            return self.fc(h_pooled), h_pooled
+            return self.fc(h_pooled), h_pooled, dynamic_adj, attention_weights
 
         # Classification
         logits = self.fc(h_pooled)
@@ -355,15 +366,15 @@ class MDGN(nn.Module):
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f"MDGN initialized: {total_params} parameters ({trainable_params} trainable)")
 
-    def forward(self, x, static_adj=None, return_features=False):
+    def forward(self, x, static_adj=None, return_features=False, extract_attention=False):
         # Ensure input data and weights are on the same device
         device = next(self.parameters()).device
         x = x.to(device)
         if static_adj is not None:
             static_adj = static_adj.to(device)
 
-        if return_features:
-            return self.encoder(x, static_adj, return_features=True)
+        if return_features or extract_attention:
+            return self.encoder(x, static_adj, return_features=return_features, extract_attention=extract_attention)
         return self.encoder(x, static_adj)
 
     def clone(self):
@@ -400,3 +411,474 @@ class MDGN(nn.Module):
         for name, param in self.named_parameters():
             if name in params:
                 param.data = params[name].data
+
+
+# ========== BASELINE MODELS ==========
+
+class CNNModel(nn.Module):
+    """1D CNN baseline model for HRRP recognition"""
+
+    def __init__(self, num_classes, feature_size=None):
+        super(CNNModel, self).__init__()
+        feature_size = feature_size or Config.feature_size
+
+        self.cnn = nn.Sequential(
+            nn.Conv1d(1, 32, kernel_size=7, padding=3),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+
+            nn.Conv1d(32, 64, kernel_size=5, padding=2),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+
+            nn.Conv1d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+
+            nn.Conv1d(128, 128, kernel_size=3, padding=1),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1)
+        )
+
+        self.fc = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(64, num_classes)
+        )
+
+    def forward(self, x, return_features=False):
+        features = self.cnn(x).squeeze(-1)
+        logits = self.fc(features)
+
+        if return_features:
+            return logits, features
+        return logits, None
+
+
+class LSTMModel(nn.Module):
+    """LSTM baseline model for HRRP recognition"""
+
+    def __init__(self, num_classes, feature_size=None):
+        super(LSTMModel, self).__init__()
+        feature_size = feature_size or Config.feature_size
+
+        self.lstm = nn.LSTM(
+            input_size=1,
+            hidden_size=128,
+            num_layers=2,
+            batch_first=True,
+            bidirectional=True,
+            dropout=0.3
+        )
+
+        self.fc = nn.Sequential(
+            nn.Linear(256, 64),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(64, num_classes)
+        )
+
+    def forward(self, x, return_features=False):
+        # Reshape for LSTM: [batch, channels, seq_len] -> [batch, seq_len, channels]
+        x = x.transpose(1, 2)
+        lstm_out, _ = self.lstm(x)
+
+        # Global average pooling over sequence length
+        features = lstm_out.mean(dim=1)
+        logits = self.fc(features)
+
+        if return_features:
+            return logits, features
+        return logits, None
+
+
+class GCNModel(nn.Module):
+    """Graph Convolutional Network baseline for HRRP recognition"""
+
+    def __init__(self, num_classes, feature_size=None):
+        super(GCNModel, self).__init__()
+        feature_size = feature_size or Config.feature_size
+        hidden_channels = 64
+
+        # Feature extractor
+        self.feature_extractor = FeatureExtractor(in_channels=1, out_channels=1)
+
+        # GCN layers without dynamic graph generation
+        self.conv1 = GraphConvLayer(1, hidden_channels)
+        self.conv2 = GraphConvLayer(hidden_channels, hidden_channels)
+
+        self.pooling = GlobalAttentionPooling(hidden_channels)
+        self.fc = nn.Linear(hidden_channels, num_classes)
+
+        self.dropout = nn.Dropout(0.3)
+
+    def forward(self, x, static_adj=None, return_features=False):
+        if static_adj is None:
+            batch_size, _, seq_len = x.size()
+            device = x.device
+            # Create fixed adjacency matrix based on distance
+            static_adj = self._create_distance_adj(seq_len).to(device)
+            static_adj = static_adj.unsqueeze(0).expand(batch_size, -1, -1)
+
+        # Feature extraction
+        x = self.feature_extractor(x)
+
+        # GCN layers
+        x = self.conv1(x, static_adj)
+        x = self.dropout(x)
+        x = self.conv2(x, static_adj)
+        x = self.dropout(x)
+
+        # Pooling and classification
+        features = self.pooling(x)
+        logits = self.fc(features)
+
+        if return_features:
+            return logits, features
+        return logits, static_adj
+
+    def _create_distance_adj(self, seq_len):
+        """Create adjacency matrix based on distance between nodes"""
+        indices = torch.arange(seq_len)
+        distances = torch.abs(indices.unsqueeze(1) - indices.unsqueeze(0))
+        # Convert distance to similarity (closer = higher weight)
+        adj = 1.0 / (distances + 1)
+        return adj
+
+
+class GATModel(nn.Module):
+    """Graph Attention Network baseline for HRRP recognition"""
+
+    def __init__(self, num_classes, feature_size=None):
+        super(GATModel, self).__init__()
+        feature_size = feature_size or Config.feature_size
+        hidden_channels = 64
+
+        # Feature extractor
+        self.feature_extractor = FeatureExtractor(in_channels=1, out_channels=1)
+
+        # Feature enhancement layer
+        self.feature_enhance = nn.Sequential(
+            nn.Conv1d(1, hidden_channels, kernel_size=3, padding=1),
+            nn.BatchNorm1d(hidden_channels),
+            nn.LeakyReLU()
+        )
+
+        # GAT layers
+        self.gat1 = GraphAttention(hidden_channels, hidden_channels, heads=4)
+        self.gat2 = GraphAttention(hidden_channels, hidden_channels, heads=4)
+
+        self.pooling = GlobalAttentionPooling(hidden_channels)
+        self.fc = nn.Linear(hidden_channels, num_classes)
+
+        self.dropout = nn.Dropout(0.3)
+
+    def forward(self, x, return_features=False):
+        # Feature extraction
+        x = self.feature_extractor(x)
+        x = self.feature_enhance(x)
+
+        # GAT layers
+        gat1_out, adj1 = self.gat1(x)
+        gat1_out = self.dropout(gat1_out)
+        gat2_out, adj2 = self.gat2(gat1_out)
+        gat2_out = self.dropout(gat2_out)
+
+        # Pooling and classification
+        features = self.pooling(gat2_out)
+        logits = self.fc(features)
+
+        if return_features:
+            return logits, features
+        return logits, adj2
+
+
+class ProtoNetModel(nn.Module):
+    """Prototypical Network for few-shot HRRP recognition"""
+
+    def __init__(self, feature_size=None):
+        super(ProtoNetModel, self).__init__()
+        feature_size = feature_size or Config.feature_size
+
+        # Embedding network
+        self.encoder = nn.Sequential(
+            nn.Conv1d(1, 32, kernel_size=5, padding=2),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+
+            nn.Conv1d(32, 64, kernel_size=5, padding=2),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+
+            nn.Conv1d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+
+            nn.Conv1d(128, 128, kernel_size=3, padding=1),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1)
+        )
+
+    def forward(self, x, return_features=True):
+        # Extract features: [batch, 128]
+        features = self.encoder(x).squeeze(-1)
+        return features
+
+    def compute_prototypes(self, support_features, support_labels, n_way):
+        """Compute class prototypes from support features"""
+        prototypes = []
+
+        for i in range(n_way):
+            # Select features for each class
+            class_features = support_features[support_labels == i]
+            # Compute mean to get prototype
+            prototype = class_features.mean(dim=0)
+            prototypes.append(prototype)
+
+        return torch.stack(prototypes)
+
+    def compute_distances(self, query_features, prototypes):
+        """Compute distance from queries to prototypes"""
+        n_queries = query_features.size(0)
+        n_prototypes = prototypes.size(0)
+
+        # Reshape to compute distances
+        query_features = query_features.unsqueeze(1).expand(n_queries, n_prototypes, -1)
+        prototypes = prototypes.unsqueeze(0).expand(n_queries, n_prototypes, -1)
+
+        # Compute euclidean distance
+        return torch.sum((query_features - prototypes) ** 2, dim=2)
+
+
+class MatchingNetModel(nn.Module):
+    """Matching Network for few-shot HRRP recognition"""
+
+    def __init__(self, feature_size=None):
+        super(MatchingNetModel, self).__init__()
+        feature_size = feature_size or Config.feature_size
+
+        # Embedding network (same as ProtoNet for simplicity)
+        self.encoder = nn.Sequential(
+            nn.Conv1d(1, 32, kernel_size=5, padding=2),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+
+            nn.Conv1d(32, 64, kernel_size=5, padding=2),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+
+            nn.Conv1d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+
+            nn.Conv1d(128, 128, kernel_size=3, padding=1),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1)
+        )
+
+        # Full context embedding for support
+        self.lstm = nn.LSTM(128, 128, batch_first=True, bidirectional=True)
+
+    def forward(self, x, support_set=None, support_labels=None, return_features=True):
+        # Extract features: [batch, 128]
+        features = self.encoder(x).squeeze(-1)
+
+        if support_set is None or return_features:
+            return features
+
+        # Process support set
+        support_features = self.encoder(support_set).squeeze(-1)
+
+        # Compute attention
+        cosine_similarities = self._compute_cosine_similarity(features, support_features)
+        attention = F.softmax(cosine_similarities, dim=1)
+
+        # Weighted sum of support labels
+        n_classes = len(torch.unique(support_labels))
+        y_one_hot = F.one_hot(support_labels, n_classes).float()
+        logits = torch.matmul(attention, y_one_hot)
+
+        return logits, features
+
+    def _compute_cosine_similarity(self, query_features, support_features):
+        """Compute cosine similarity between query and support features"""
+        query_norm = F.normalize(query_features, p=2, dim=1)
+        support_norm = F.normalize(support_features, p=2, dim=1)
+
+        return torch.matmul(query_norm, support_norm.transpose(0, 1))
+
+
+class PCASVM:
+    """PCA + SVM baseline for HRRP recognition"""
+
+    def __init__(self, n_components=50):
+        self.pca = PCA(n_components=n_components)
+        self.svm = SVC(kernel='rbf', probability=True)
+        self.is_fitted = False
+
+    def fit(self, X, y):
+        """Fit PCA and SVM on training data"""
+        # Reshape if needed
+        if len(X.shape) > 2:
+            X = X.reshape(X.shape[0], -1)
+
+        # Fit PCA
+        X_pca = self.pca.fit_transform(X)
+
+        # Fit SVM
+        self.svm.fit(X_pca, y)
+        self.is_fitted = True
+
+    def predict(self, X):
+        """Predict class labels"""
+        if not self.is_fitted:
+            raise RuntimeError("Model is not fitted yet.")
+
+        # Reshape if needed
+        if len(X.shape) > 2:
+            X = X.reshape(X.shape[0], -1)
+
+        # Transform and predict
+        X_pca = self.pca.transform(X)
+        return self.svm.predict(X_pca)
+
+    def predict_proba(self, X):
+        """Predict class probabilities"""
+        if not self.is_fitted:
+            raise RuntimeError("Model is not fitted yet.")
+
+        # Reshape if needed
+        if len(X.shape) > 2:
+            X = X.reshape(X.shape[0], -1)
+
+        # Transform and predict probabilities
+        X_pca = self.pca.transform(X)
+        return self.svm.predict_proba(X_pca)
+
+
+class TemplateMatcher:
+    """Template matching baseline for HRRP recognition"""
+
+    def __init__(self, metric='correlation'):
+        self.templates = {}
+        self.classes = []
+        self.metric = metric
+
+    def fit(self, X, y):
+        """Create templates for each class"""
+        self.classes = np.unique(y)
+
+        # Create average template for each class
+        for cls in self.classes:
+            # Select samples for this class
+            class_samples = X[y == cls]
+
+            # Create average template
+            if len(class_samples.shape) > 2:
+                # If input is [batch, channels, seq_len]
+                template = class_samples.mean(axis=0)
+            else:
+                # If input is [batch, seq_len]
+                template = class_samples.mean(axis=0, keepdims=True)
+
+            self.templates[cls] = template
+
+    def predict(self, X):
+        """Predict class by matching against templates"""
+        predictions = []
+
+        for sample in X:
+            best_score = -float('inf')
+            best_class = None
+
+            # Compare with each template
+            for cls, template in self.templates.items():
+                if self.metric == 'correlation':
+                    score = self._correlation(sample, template)
+                elif self.metric == 'euclidean':
+                    score = -self._euclidean(sample, template)  # Negative so higher is better
+                else:
+                    raise ValueError(f"Unknown metric: {self.metric}")
+
+                if score > best_score:
+                    best_score = score
+                    best_class = cls
+
+            predictions.append(best_class)
+
+        return np.array(predictions)
+
+    def _correlation(self, x, template):
+        """Compute correlation coefficient"""
+        # Flatten if needed
+        if len(x.shape) > 1:
+            x = x.flatten()
+        if len(template.shape) > 1:
+            template = template.flatten()
+
+        return np.corrcoef(x, template)[0, 1]
+
+    def _euclidean(self, x, template):
+        """Compute Euclidean distance"""
+        # Flatten if needed
+        if len(x.shape) > 1:
+            x = x.flatten()
+        if len(template.shape) > 1:
+            template = template.flatten()
+
+        return np.sqrt(np.sum((x - template) ** 2))
+
+
+# ========== ABLATION MODEL VARIANTS ==========
+
+class StaticGraphModel(MDGN):
+    """Static graph variant for ablation study"""
+
+    def __init__(self, num_classes=3):
+        super(StaticGraphModel, self).__init__(num_classes)
+        # Force static graph mode
+        self.encoder.graph_generator.use_dynamic_graph = False
+
+    def forward(self, x, static_adj=None, return_features=False):
+        # Ensure static graph is used
+        return super().forward(x, static_adj, return_features)
+
+
+class DynamicGraphModel(MDGN):
+    """Pure dynamic graph variant for ablation study"""
+
+    def __init__(self, num_classes=3):
+        super(DynamicGraphModel, self).__init__(num_classes)
+        # Force dynamic graph mode
+        self.encoder.graph_generator.use_dynamic_graph = True
+        self.encoder.graph_generator.lambda_mix = 0.0  # Pure dynamic (no static component)
+
+    def forward(self, x, static_adj=None, return_features=False):
+        # Use only dynamic graph
+        return super().forward(x, static_adj=None, return_features=return_features)
+
+
+class HybridGraphModel(MDGN):
+    """Hybrid graph variant with configurable mixing ratio"""
+
+    def __init__(self, num_classes=3, lambda_mix=0.5):
+        super(HybridGraphModel, self).__init__(num_classes)
+        # Set hybrid graph mode with specified lambda
+        self.encoder.graph_generator.use_dynamic_graph = True
+        self.encoder.graph_generator.lambda_mix = lambda_mix
+
+    def forward(self, x, static_adj=None, return_features=False):
+        return super().forward(x, static_adj, return_features)
