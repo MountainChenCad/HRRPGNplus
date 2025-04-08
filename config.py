@@ -36,7 +36,7 @@ class Config:
     # 模型配置
     hidden_channels = 64
     attention_heads = 4
-    graph_conv_layers = 3
+    graph_conv_layers = 2 # 3
     dropout = 0.1
 
     # 动态图配置

@@ -331,22 +331,33 @@ def test_model(model, test_task_generator, device, num_tasks=None, shot=None):
             support_x, support_y = support_x.to(device), support_y.to(device)
             query_x, query_y = query_x.to(device), query_y.to(device)
 
-            # Create a temporary training instance for this task
+            # 创建一个临时训练实例进行任务适应
             temp_trainer = MAMLPlusPlusTrainer(copy.deepcopy(model), device)
 
-            # Perform inner loop adaptation
+            # 执行内循环适应
             updated_model, _, _, _ = temp_trainer.inner_loop(
                 support_x,
                 support_y,
                 create_graph=False
             )
 
-            # Evaluate on query set
+            # 在查询集上评估
             batch_size, channels, seq_len = query_x.shape
             static_adj = prepare_static_adjacency(batch_size, seq_len, device)
 
             with torch.no_grad():
-                query_logits, _ = updated_model(query_x, static_adj)
+                # 修改这部分代码以适应不同模型的输出格式
+                if hasattr(updated_model, '__class__') and updated_model.__class__.__name__ in ['CNNModel', 'LSTMModel',
+                                                                                                'GATModel']:
+                    if updated_model.__class__.__name__ == 'GATModel':
+                        query_logits, _ = updated_model(query_x)
+                    else:
+                        # CNN和LSTM模型不需要adjacency matrix作为输入
+                        query_logits, _ = updated_model(query_x)
+                else:
+                    # MDGN和其他需要adjacency matrix的模型
+                    query_logits, _ = updated_model(query_x, static_adj)
+
                 pred = torch.argmax(query_logits, dim=1)
 
                 # Collect predictions and labels
@@ -852,7 +863,7 @@ def compare_with_baselines(test_dataset, device, shot=5, baseline_models=None):
                 query_y_np = query_y.detach().numpy()
 
                 # Train PCA+SVM
-                pca_svm = PCASVM(n_components=min(50, support_x_np.shape[1]))
+                pca_svm = PCASVM()
                 pca_svm.fit(support_x_np, support_y_np)
 
                 # Test
@@ -1019,9 +1030,19 @@ def visualize_model_interpretability(model, test_task_generator, device):
 
             # Forward pass with attention extraction
             with torch.no_grad():
-                logits, features, adj_matrix, attention_weights = updated_model(
-                    sample_x, sample_static_adj, return_features=True, extract_attention=True
-                )
+                # 检查模型类型
+                if hasattr(updated_model, '__class__') and updated_model.__class__.__name__ in ['CNNModel', 'LSTMModel', 'GATModel']:
+                    if updated_model.__class__.__name__ == 'GATModel':
+                        outputs = updated_model(sample_x, return_features=True, extract_attention=True)
+                        logits, features, adj_matrix, attention_weights = outputs
+                    else:
+                        # CNN和LSTM模型
+                        outputs = updated_model(sample_x, return_features=True, extract_attention=True)
+                        logits, features, adj_matrix, attention_weights = outputs
+                else:
+                    # MDGN和其他需要adjacency matrix的模型
+                    outputs = updated_model(sample_x, sample_static_adj, return_features=True, extract_attention=True)
+                    logits, features, adj_matrix, attention_weights = outputs
 
             pred = torch.argmax(logits, dim=1).detach().cpu().numpy()[0]
             true_label = sample_y.detach().cpu().numpy()[0]
@@ -1239,3 +1260,158 @@ def computational_complexity_analysis(test_task_generator, device):
     plt.close()
 
     return results_df
+
+
+def ablation_study_meta_learning(model, test_task_generator, device):
+    """元学习组件消融实验"""
+    # 创建结果目录
+    results_dir = os.path.join(Config.log_dir, 'meta_learning_ablation')
+    os.makedirs(results_dir, exist_ok=True)
+
+    # 保存原始配置
+    original_per_layer_lr = Config.use_per_layer_lr
+    original_per_step_lr = Config.use_per_step_lr
+    original_multi_step_loss = Config.use_multi_step_loss
+    original_second_order = Config.use_second_order
+
+    # 保存结果数据
+    results_data = []
+
+    # 测试所有组合
+    test_combinations = []
+
+    # 根据配置生成测试组合
+    if Config.meta_learning_ablation['enabled']:
+        for per_layer in Config.meta_learning_ablation['per_layer_lr_enabled']:
+            for per_step in Config.meta_learning_ablation['per_step_lr_enabled']:
+                for multi_step in Config.meta_learning_ablation['multi_step_loss_enabled']:
+                    for second_order in Config.meta_learning_ablation['second_order_enabled']:
+                        test_combinations.append({
+                            'per_layer_lr': per_layer,
+                            'per_step_lr': per_step,
+                            'multi_step_loss': multi_step,
+                            'second_order': second_order,
+                            'name': f"PL:{per_layer}_PS:{per_step}_MS:{multi_step}_SO:{second_order}"
+                        })
+
+    # 如果组合太多，可以选择一些关键组合
+    if len(test_combinations) > 8:
+        # 标准MAML (所有增强都关闭)
+        test_combinations = [
+            {'per_layer_lr': False, 'per_step_lr': False, 'multi_step_loss': False, 'second_order': False,
+             'name': 'Standard MAML'},
+            # 完整MAML++ (所有增强都开启)
+            {'per_layer_lr': True, 'per_step_lr': True, 'multi_step_loss': True, 'second_order': True,
+             'name': 'Full MAML++'},
+            # 单一组件测试
+            {'per_layer_lr': True, 'per_step_lr': False, 'multi_step_loss': False, 'second_order': False,
+             'name': 'Only Per-Layer LR'},
+            {'per_layer_lr': False, 'per_step_lr': True, 'multi_step_loss': False, 'second_order': False,
+             'name': 'Only Per-Step LR'},
+            {'per_layer_lr': False, 'per_step_lr': False, 'multi_step_loss': True, 'second_order': False,
+             'name': 'Only Multi-Step Loss'},
+            {'per_layer_lr': False, 'per_step_lr': False, 'multi_step_loss': False, 'second_order': True,
+             'name': 'Only Second-Order'}
+        ]
+
+    # 对每种组合进行测试
+    performance_results = []
+    for config_set in test_combinations:
+        print(f"\n测试元学习配置: {config_set['name']}")
+
+        # 应用配置
+        Config.use_per_layer_lr = config_set['per_layer_lr']
+        Config.use_per_step_lr = config_set['per_step_lr']
+        Config.use_multi_step_loss = config_set['multi_step_loss']
+        Config.use_second_order = config_set['second_order']
+
+        # 测试模型
+        accuracy, ci, _, f1 = test_model(model, test_task_generator, device, num_tasks=50)
+
+        # 记录结果
+        result = {
+            'Name': config_set['name'],
+            'Per_Layer_LR': config_set['per_layer_lr'],
+            'Per_Step_LR': config_set['per_step_lr'],
+            'Multi_Step_Loss': config_set['multi_step_loss'],
+            'Second_Order': config_set['second_order'],
+            'Accuracy': accuracy,
+            'CI': ci,
+            'F1': f1
+        }
+
+        results_data.append(result)
+        performance_results.append((config_set['name'], accuracy, ci, f1))
+
+        print(f"配置 {config_set['name']} 精度: {accuracy:.2f}% ± {ci:.2f}%, F1: {f1:.2f}%")
+
+    # 还原原始配置
+    Config.use_per_layer_lr = original_per_layer_lr
+    Config.use_per_step_lr = original_per_step_lr
+    Config.use_multi_step_loss = original_multi_step_loss
+    Config.use_second_order = original_second_order
+
+    # 保存结果到CSV
+    results_df = pd.DataFrame(results_data)
+    results_df.to_csv(os.path.join(results_dir, 'meta_learning_ablation_results.csv'), index=False)
+
+    # 创建可视化
+    plt.figure(figsize=(12, 8))
+
+    # 结果排序
+    names = [r[0] for r in performance_results]
+    accs = [r[1] for r in performance_results]
+    cis = [r[2] for r in performance_results]
+    f1s = [r[3] for r in performance_results]
+
+    # 按精度降序排序
+    sorted_indices = np.argsort(accs)[::-1]
+    names = [names[i] for i in sorted_indices]
+    accs = [accs[i] for i in sorted_indices]
+    cis = [cis[i] for i in sorted_indices]
+    f1s = [f1s[i] for i in sorted_indices]
+
+    x_pos = np.arange(len(names))
+
+    # 绘制精度条形图
+    plt.bar(x_pos - 0.2, accs, width=0.4, yerr=cis, capsize=5, label='Accuracy', color='blue', alpha=0.7)
+
+    # 绘制F1分数条形图
+    plt.bar(x_pos + 0.2, f1s, width=0.4, label='F1 Score', color='green', alpha=0.7)
+
+    plt.xticks(x_pos, names, rotation=45, ha='right')
+    plt.title('Meta-Learning Component Ablation Study')
+    plt.ylabel('Performance (%)')
+    plt.grid(axis='y')
+    plt.legend()
+    plt.tight_layout()
+
+    plt.savefig(os.path.join(results_dir, 'meta_learning_ablation_plot.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # 创建热力图以显示组件重要性
+    if len(results_data) >= 4:
+        plt.figure(figsize=(10, 8))
+
+        # 准备热力图数据
+        components = ['Per_Layer_LR', 'Per_Step_LR', 'Multi_Step_Loss', 'Second_Order']
+        heatmap_data = np.zeros((2, len(components)))
+
+        # 计算每个组件开启/关闭的平均性能
+        for component_idx, component in enumerate(components):
+            enabled_accs = [r['Accuracy'] for r in results_data if r[component]]
+            disabled_accs = [r['Accuracy'] for r in results_data if not r[component]]
+
+            heatmap_data[0, component_idx] = np.mean(disabled_accs) if disabled_accs else 0  # OFF
+            heatmap_data[1, component_idx] = np.mean(enabled_accs) if enabled_accs else 0  # ON
+
+        sns.heatmap(heatmap_data, annot=True, fmt='.2f', cmap='YlGnBu',
+                    xticklabels=[c.replace('_', ' ') for c in components],
+                    yticklabels=['OFF', 'ON'])
+
+        plt.title('Component Importance Heatmap (Average Accuracy)')
+        plt.tight_layout()
+        plt.savefig(os.path.join(results_dir, 'component_importance_heatmap.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+
+    return results_data

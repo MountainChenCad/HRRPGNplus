@@ -22,7 +22,7 @@ from models import (
 from train import (
     MAMLPlusPlusTrainer as MAMLTrainer, test_model, shot_experiment,
     ablation_study_lambda, ablation_study_dynamic_graph, ablation_study_gnn_architecture,
-    noise_robustness_experiment, compare_with_baselines,
+    noise_robustness_experiment, compare_with_baselines, ablation_study_meta_learning,
     visualize_model_interpretability, computational_complexity_analysis
 )
 from utils import (
@@ -631,6 +631,26 @@ def run_ablation_studies(args):
 
         with open(os.path.join(ablation_dir, 'dynamic_graph_ablation_results.json'), 'w') as f:
             json.dump(graph_results_data, f, indent=4)
+
+    # 在 run_ablation_studies 函数中
+    # Run meta-learning ablation study
+    if ablation_type in ['all', 'meta_learning']:
+        print("\nRunning meta-learning ablation study...")
+        meta_learning_results = ablation_study_meta_learning(
+            model, test_task_generator, Config.device
+        )
+
+        # Save results
+        with open(os.path.join(ablation_dir, 'meta_learning_ablation_results.json'), 'w') as f:
+            # Convert numpy arrays to lists for JSON serialization
+            serializable_results = {}
+            for key, value in meta_learning_results.items():
+                if isinstance(value, np.ndarray):
+                    serializable_results[key] = value.tolist()
+                else:
+                    serializable_results[key] = value
+
+            json.dump(serializable_results, f, indent=4)
 
     # Run GNN architecture ablation study
     if ablation_type in ['all', 'gnn_architecture']:

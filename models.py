@@ -451,12 +451,12 @@ class CNNModel(nn.Module):
             nn.Linear(64, num_classes)
         )
 
-    def forward(self, x, return_features=False):
+    def forward(self, x, static_adj=None, return_features=False, extract_attention=False):
         features = self.cnn(x).squeeze(-1)
         logits = self.fc(features)
 
         if return_features:
-            return logits, features
+            return logits, features, None, None if extract_attention else None
         return logits, None
 
 
@@ -483,17 +483,17 @@ class LSTMModel(nn.Module):
             nn.Linear(64, num_classes)
         )
 
-    def forward(self, x, return_features=False):
-        # Reshape for LSTM: [batch, channels, seq_len] -> [batch, seq_len, channels]
+    def forward(self, x, static_adj=None, return_features=False, extract_attention=False):
+        # 重塑用于LSTM的数据：[batch, channels, seq_len] -> [batch, seq_len, channels]
         x = x.transpose(1, 2)
         lstm_out, _ = self.lstm(x)
 
-        # Global average pooling over sequence length
+        # 序列长度上的全局平均池化
         features = lstm_out.mean(dim=1)
         logits = self.fc(features)
 
         if return_features:
-            return logits, features
+            return logits, features, None, None if extract_attention else None
         return logits, None
 
 
@@ -517,29 +517,31 @@ class GCNModel(nn.Module):
 
         self.dropout = nn.Dropout(0.3)
 
-    def forward(self, x, static_adj=None, return_features=False):
+    # models.py 中的 GCNModel 类
+    def forward(self, x, static_adj=None, return_features=False, extract_attention=False):
         if static_adj is None:
             batch_size, _, seq_len = x.size()
             device = x.device
-            # Create fixed adjacency matrix based on distance
+            # 基于距离创建固定的邻接矩阵
             static_adj = self._create_distance_adj(seq_len).to(device)
             static_adj = static_adj.unsqueeze(0).expand(batch_size, -1, -1)
 
-        # Feature extraction
+        # 特征提取
         x = self.feature_extractor(x)
 
-        # GCN layers
+        # GCN层
         x = self.conv1(x, static_adj)
         x = self.dropout(x)
         x = self.conv2(x, static_adj)
         x = self.dropout(x)
 
-        # Pooling and classification
+        # 池化和分类
         features = self.pooling(x)
         logits = self.fc(features)
 
         if return_features:
-            return logits, features
+            attention_weights = getattr(self.pooling, 'last_attention_weights', None)
+            return logits, features, static_adj, attention_weights if extract_attention else None
         return logits, static_adj
 
     def _create_distance_adj(self, seq_len):
@@ -578,23 +580,24 @@ class GATModel(nn.Module):
 
         self.dropout = nn.Dropout(0.3)
 
-    def forward(self, x, return_features=False):
-        # Feature extraction
+    def forward(self, x, static_adj=None, return_features=False, extract_attention=False):
+        # 特征提取
         x = self.feature_extractor(x)
         x = self.feature_enhance(x)
 
-        # GAT layers
+        # GAT层
         gat1_out, adj1 = self.gat1(x)
         gat1_out = self.dropout(gat1_out)
         gat2_out, adj2 = self.gat2(gat1_out)
         gat2_out = self.dropout(gat2_out)
 
-        # Pooling and classification
+        # 池化和分类
         features = self.pooling(gat2_out)
         logits = self.fc(features)
 
         if return_features:
-            return logits, features
+            attention_weights = getattr(self.pooling, 'last_attention_weights', None)
+            return logits, features, adj2, attention_weights if extract_attention else None
         return logits, adj2
 
 
@@ -721,24 +724,40 @@ class MatchingNetModel(nn.Module):
         return torch.matmul(query_norm, support_norm.transpose(0, 1))
 
 
+# models.py 中的 PCASVM 类，大约在第 724 行开始
 class PCASVM:
     """PCA + SVM baseline for HRRP recognition"""
 
-    def __init__(self, n_components=50):
-        self.pca = PCA(n_components=n_components)
+    def __init__(self, n_components=None):
+        # 不在初始化时创建PCA，而是在fit时动态设置
+        self.n_components = n_components
+        self.pca = None
         self.svm = SVC(kernel='rbf', probability=True)
         self.is_fitted = False
 
     def fit(self, X, y):
         """Fit PCA and SVM on training data"""
-        # Reshape if needed
+        # 重塑数据（如果需要）
         if len(X.shape) > 2:
             X = X.reshape(X.shape[0], -1)
 
-        # Fit PCA
+        # 动态确定PCA组件数量
+        if self.n_components is None:
+            # 自动设置组件数，但不超过可用特征/样本数
+            max_components = min(X.shape[0], X.shape[1]) - 1
+            n_components = min(30, max_components)  # 使用30或可用的最大值
+        else:
+            # 使用指定的组件数，但确保不超过限制
+            n_components = min(self.n_components, min(X.shape[0], X.shape[1]) - 1)
+
+        # 保证组件数至少为1
+        n_components = max(1, n_components)
+
+        # 创建并拟合PCA
+        self.pca = PCA(n_components=n_components)
         X_pca = self.pca.fit_transform(X)
 
-        # Fit SVM
+        # 拟合SVM
         self.svm.fit(X_pca, y)
         self.is_fitted = True
 
