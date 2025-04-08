@@ -642,13 +642,16 @@ def run_ablation_studies(args):
 
         # Save results
         with open(os.path.join(ablation_dir, 'meta_learning_ablation_results.json'), 'w') as f:
-            # Convert numpy arrays to lists for JSON serialization
-            serializable_results = {}
-            for key, value in meta_learning_results.items():
-                if isinstance(value, np.ndarray):
-                    serializable_results[key] = value.tolist()
-                else:
-                    serializable_results[key] = value
+            # 元学习结果是列表，需要正确处理
+            serializable_results = []
+            for item in meta_learning_results:
+                serializable_item = {}
+                for key, value in item.items():
+                    if isinstance(value, np.ndarray):
+                        serializable_item[key] = value.tolist()
+                    else:
+                        serializable_item[key] = value
+                serializable_results.append(serializable_item)
 
             json.dump(serializable_results, f, indent=4)
 
