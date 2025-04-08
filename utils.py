@@ -289,7 +289,7 @@ def visualize_dynamic_graph(adjacency, save_path=None, title='Dynamic Graph Adja
 
     # 转换为numpy数组
     if isinstance(adjacency, torch.Tensor):
-        adjacency = adjacency.cpu().numpy()
+        adjacency = adjacency.detach().cpu().numpy()
 
     # 应用阈值（如果指定）
     if threshold is not None:
@@ -366,13 +366,17 @@ def visualize_attention(data, attention_weights, title='Attention Weights',
 
     # 确保数据是numpy数组
     if isinstance(data, torch.Tensor):
-        data_np = data.cpu().numpy().flatten()
+        # 修改前: data_np = data.cpu().numpy().flatten()
+        # 修改后:
+        data_np = data.detach().cpu().numpy().flatten()
     else:
         data_np = np.array(data).flatten()
 
     # 确保注意力权重是numpy数组
     if isinstance(attention_weights, torch.Tensor):
-        attn_np = attention_weights.cpu().numpy().flatten()
+        # 修改前: attn_np = attention_weights.cpu().numpy().flatten()
+        # 修改后:
+        attn_np = attention_weights.detach().cpu().numpy().flatten()
     else:
         attn_np = np.array(attention_weights).flatten()
 

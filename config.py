@@ -22,7 +22,7 @@ class Config:
     n_way = 3  # N-way分类
     k_shot = 5  # K-shot (支持集每类样本数)
     q_query = 15  # 查询集每类样本数
-    num_tasks = 600  # 测试任务数量
+    num_tasks = 100  # 600
 
     # 交叉验证方案
     cross_validation_schemes = [
@@ -47,9 +47,9 @@ class Config:
     inner_lr = 0.005  # 初始内循环学习率基准值
     outer_lr = 0.0005  # 初始外循环学习率
     inner_steps = 5  # 内循环更新步数
-    task_batch_size = 4  # 每批次任务数
+    task_batch_size = 1  # 4
     max_epochs = 300  # 最大迭代轮次
-    patience = 20  # 早停耐心值
+    patience = 20  # 100
 
     # MAML++ 多步骤损失权重
     # 按步骤递增的权重，越靠后的步骤权重越大
@@ -103,14 +103,14 @@ class Config:
     noise_robustness = {
         'enabled': True,
         'snr_levels': [20, 15, 10, 5, 0, -5],  # 信噪比水平 (dB)
-        'num_tasks': 100  # 每个信噪比水平测试的任务数
+        'num_tasks': 100  # 100
     }
 
     # 数据稀疏性实验配置
     data_sparsity = {
         'enabled': True,
         'shot_levels': [1, 5, 10, 20],  # K-shot设置
-        'num_tasks': 100  # 每个shot水平测试的任务数
+        'num_tasks': 100  # 100
     }
 
     # ========== 消融实验配置 ==========

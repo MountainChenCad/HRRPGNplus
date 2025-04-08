@@ -995,15 +995,17 @@ def visualize_model_interpretability(model, test_task_generator, device):
         # 1. Visualize attention weights
         print("  Visualizing attention weights...")
         batch_size, channels, seq_len = query_x.shape
-        static_adj = prepare_static_adjacency(batch_size, seq_len, device)
 
         for i in range(min(5, batch_size)):  # Visualize first 5 samples
             sample_x = query_x[i:i + 1]
             sample_y = query_y[i:i + 1]
 
+            # 重要修复：为单个样本创建正确大小的邻接矩阵
+            sample_static_adj = prepare_static_adjacency(1, seq_len, device)
+
             # Forward pass with attention extraction
             logits, features, adj_matrix, attention_weights = updated_model(
-                sample_x, static_adj, return_features=True, extract_attention=True
+                sample_x, sample_static_adj, return_features=True, extract_attention=True
             )
 
             pred = torch.argmax(logits, dim=1).cpu().numpy()[0]
@@ -1023,8 +1025,11 @@ def visualize_model_interpretability(model, test_task_generator, device):
         sample_idx = np.random.randint(0, batch_size)
         sample_x = query_x[sample_idx:sample_idx + 1]
 
+        # 重要修复：为单个样本创建正确大小的邻接矩阵
+        sample_static_adj = prepare_static_adjacency(1, seq_len, device)
+
         # Forward pass to get adjacency matrix
-        _, adj_matrix = updated_model(sample_x, static_adj)
+        _, adj_matrix = updated_model(sample_x, sample_static_adj)
 
         # Visualize adjacency matrix
         visualize_dynamic_graph(
@@ -1042,8 +1047,10 @@ def visualize_model_interpretability(model, test_task_generator, device):
             sample_x = query_x[i:i + 1]
             sample_y = query_y[i:i + 1]
 
+            sample_static_adj = prepare_static_adjacency(1, seq_len, device)
+
             # Forward pass to extract features
-            _, features = updated_model(sample_x, static_adj, return_features=True)[0:2]
+            _, features = updated_model(sample_x, sample_static_adj, return_features=True)[0:2]
 
             batch_features.append(features.cpu().numpy())
             batch_labels.append(sample_y.cpu().numpy()[0])
