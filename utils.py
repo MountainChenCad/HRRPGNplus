@@ -19,6 +19,26 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 import matplotlib.gridspec as gridspec
 import io
 from PIL import Image
+import matplotlib as mpl
+from matplotlib.ticker import MaxNLocator
+
+# Define CVPR-quality color palette
+COLORS = ['#0783D5', '#E52119', '#FD751F', '#0E2D88', '#78196D',
+          '#C2C121', '#FC837E', '#00A6BC', '#025057', '#7E5505', '#77196C']
+
+# Set global matplotlib parameters
+plt.rcParams['font.family'] = 'DejaVu Sans'
+plt.rcParams['font.size'] = 11
+plt.rcParams['axes.linewidth'] = 1.5
+plt.rcParams['axes.labelsize'] = 12
+plt.rcParams['axes.labelweight'] = 'bold'
+plt.rcParams['xtick.major.width'] = 1.5
+plt.rcParams['ytick.major.width'] = 1.5
+plt.rcParams['xtick.labelsize'] = 10
+plt.rcParams['ytick.labelsize'] = 10
+plt.rcParams['legend.fontsize'] = 10
+plt.rcParams['figure.titlesize'] = 14
+plt.rcParams['axes.titlesize'] = 12
 
 
 # Generate static adjacency matrix
@@ -116,7 +136,7 @@ def compute_metrics(true_labels, pred_labels, class_names=None):
 
 def plot_confusion_matrix(cm, classes, title='Confusion Matrix', save_path=None, normalize=False, figsize=(10, 8)):
     """绘制混淆矩阵"""
-    plt.figure(figsize=figsize)
+    plt.figure(figsize=figsize, facecolor='white')
 
     # 是否归一化
     if normalize:
@@ -125,14 +145,39 @@ def plot_confusion_matrix(cm, classes, title='Confusion Matrix', save_path=None,
     else:
         fmt = 'd'
 
-    # 创建热力图
-    sns.heatmap(cm, annot=True, fmt=fmt, cmap='Blues',
-                xticklabels=classes, yticklabels=classes)
-    plt.xlabel('Predicted')
-    plt.ylabel('True')
-    plt.title(title)
+    # Create custom colormap (white to dark blue)
+    cmap = LinearSegmentedColormap.from_list('custom_cmap', ['#FFFFFF', '#0783D5'])
 
-    # 调整布局
+    # 创建热力图
+    ax = plt.subplot(111)
+    im = ax.imshow(cm, interpolation='nearest', cmap=cmap)
+
+    # Add colorbar
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size="5%", pad=0.1)
+    plt.colorbar(im, cax=cax)
+
+    # Add text annotations
+    thresh = cm.max() / 2.
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            ax.text(j, i, format(cm[i, j], fmt),
+                    ha="center", va="center",
+                    color="white" if cm[i, j] > thresh else "black",
+                    fontsize=12, fontweight='bold')
+
+    # Configure axes
+    ax.set_xticks(range(len(classes)))
+    ax.set_yticks(range(len(classes)))
+    ax.set_xticklabels(classes, rotation=45, ha='right', fontsize=10)
+    ax.set_yticklabels(classes, fontsize=10)
+
+    # Add labels and title
+    plt.xlabel('Predicted Label', fontsize=12, fontweight='bold')
+    plt.ylabel('True Label', fontsize=12, fontweight='bold')
+    plt.title(title, fontsize=14, fontweight='bold', pad=10)
+
+    # Adjust layout
     plt.tight_layout()
 
     if save_path:
@@ -145,39 +190,65 @@ def plot_confusion_matrix(cm, classes, title='Confusion Matrix', save_path=None,
 def plot_learning_curve(train_accs, val_accs, train_losses=None, val_losses=None,
                         title='Learning Curve', save_path=None, figsize=(12, 10)):
     """绘制学习曲线"""
-    plt.figure(figsize=figsize)
+    fig = plt.figure(figsize=figsize, facecolor='white')
     epochs = list(range(1, len(train_accs) + 1))
 
     # 设置双y轴图表
     if train_losses is not None and val_losses is not None:
-        ax1 = plt.subplot(211)
-        ax2 = plt.subplot(212)
+        gs = gridspec.GridSpec(2, 1, height_ratios=[1, 1])
 
         # 上图：精度曲线
-        ax1.plot(epochs, train_accs, 'b-', label='Training Accuracy')
-        ax1.plot(epochs, val_accs, 'r-', label='Validation Accuracy')
-        ax1.set_title(f"{title} - Accuracy")
-        ax1.set_ylabel('Accuracy (%)')
-        ax1.grid(True)
-        ax1.legend()
+        ax1 = plt.subplot(gs[0])
+        ax1.plot(epochs, train_accs, '-', color=COLORS[0], linewidth=2.5, marker='o',
+                 markersize=5, label='Training Accuracy')
+        ax1.plot(epochs, val_accs, '-', color=COLORS[1], linewidth=2.5, marker='s',
+                 markersize=5, label='Validation Accuracy')
+
+        ax1.set_ylabel('Accuracy (%)', fontsize=12, fontweight='bold')
+        ax1.set_title(f"{title} - Accuracy", fontsize=14, fontweight='bold', pad=10)
+        ax1.grid(True, linestyle='--', alpha=0.7)
+        ax1.legend(frameon=True, fancybox=True, shadow=True, fontsize=10)
+        ax1.spines['top'].set_visible(False)
+        ax1.spines['right'].set_visible(False)
+        ax1.tick_params(axis='both', which='major', width=1.5, length=5)
 
         # 下图：损失曲线
-        ax2.plot(epochs, train_losses, 'b-', label='Training Loss')
-        ax2.plot(epochs, val_losses, 'r-', label='Validation Loss')
-        ax2.set_title(f"{title} - Loss")
-        ax2.set_xlabel('Epochs')
-        ax2.set_ylabel('Loss')
-        ax2.grid(True)
-        ax2.legend()
+        ax2 = plt.subplot(gs[1])
+        ax2.plot(epochs, train_losses, '-', color=COLORS[0], linewidth=2.5, marker='o',
+                 markersize=5, label='Training Loss')
+        ax2.plot(epochs, val_losses, '-', color=COLORS[1], linewidth=2.5, marker='s',
+                 markersize=5, label='Validation Loss')
+
+        ax2.set_xlabel('Epochs', fontsize=12, fontweight='bold')
+        ax2.set_ylabel('Loss', fontsize=12, fontweight='bold')
+        ax2.set_title(f"{title} - Loss", fontsize=14, fontweight='bold', pad=10)
+        ax2.grid(True, linestyle='--', alpha=0.7)
+        ax2.legend(frameon=True, fancybox=True, shadow=True, fontsize=10)
+        ax2.spines['top'].set_visible(False)
+        ax2.spines['right'].set_visible(False)
+        ax2.tick_params(axis='both', which='major', width=1.5, length=5)
+
+        # Use integer ticks for epochs
+        ax1.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax2.xaxis.set_major_locator(MaxNLocator(integer=True))
+
     else:
         # 只有精度曲线
-        plt.plot(epochs, train_accs, 'b-', label='Training Accuracy')
-        plt.plot(epochs, val_accs, 'r-', label='Validation Accuracy')
-        plt.title(title)
-        plt.xlabel('Epochs')
-        plt.ylabel('Accuracy (%)')
-        plt.grid(True)
-        plt.legend()
+        ax = plt.subplot(111)
+        ax.plot(epochs, train_accs, '-', color=COLORS[0], linewidth=2.5, marker='o',
+                markersize=5, label='Training Accuracy')
+        ax.plot(epochs, val_accs, '-', color=COLORS[1], linewidth=2.5, marker='s',
+                markersize=5, label='Validation Accuracy')
+
+        ax.set_xlabel('Epochs', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Accuracy (%)', fontsize=12, fontweight='bold')
+        ax.set_title(title, fontsize=14, fontweight='bold', pad=10)
+        ax.grid(True, linestyle='--', alpha=0.7)
+        ax.legend(frameon=True, fancybox=True, shadow=True, fontsize=10)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.tick_params(axis='both', which='major', width=1.5, length=5)
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
 
     plt.tight_layout()
 
@@ -191,33 +262,52 @@ def plot_learning_curve(train_accs, val_accs, train_losses=None, val_losses=None
 def plot_shot_curve(shot_sizes, accuracies, ci=None, methods=None, f1_scores=None,
                     title='Shot-Accuracy Curve', save_path=None, figsize=(10, 6)):
     """绘制样本数-精度曲线"""
-    plt.figure(figsize=figsize)
+    fig = plt.figure(figsize=figsize, facecolor='white')
+    ax = plt.subplot(111)
 
     if methods is None:
         # 单模型，有误差条带
         if ci is not None:
-            plt.errorbar(shot_sizes, accuracies, yerr=ci, fmt='bo-', capsize=5, label='Accuracy')
+            ax.errorbar(shot_sizes, accuracies, yerr=ci, fmt='-o', capsize=5,
+                        linewidth=2.5, markersize=8, color=COLORS[0],
+                        ecolor=COLORS[0], elinewidth=1.5, label='Accuracy')
         else:
-            plt.plot(shot_sizes, accuracies, 'bo-', label='Accuracy')
+            ax.plot(shot_sizes, accuracies, '-o', linewidth=2.5, markersize=8,
+                    color=COLORS[0], label='Accuracy')
 
         # 绘制F1分数曲线（如果提供）
         if f1_scores is not None:
-            plt.plot(shot_sizes, f1_scores, 'go--', label='F1 Score')
+            ax.plot(shot_sizes, f1_scores, '--s', linewidth=2.5, markersize=8,
+                    color=COLORS[2], label='F1 Score')
     else:
         # 多模型对比
-        colors = plt.cm.tab10(np.linspace(0, 1, len(methods)))
         markers = ['o', 's', '^', 'D', 'v', '<', '>', 'p', '*', 'h']
 
         for i, (method_name, method_accs) in enumerate(zip(methods, accuracies)):
-            color = colors[i % len(colors)]
+            color = COLORS[i % len(COLORS)]
             marker = markers[i % len(markers)]
-            plt.plot(shot_sizes, method_accs, marker=marker, label=method_name, color=color)
+            ax.plot(shot_sizes, method_accs, marker=marker, linewidth=2.5, markersize=8,
+                    label=method_name, color=color)
 
-    plt.title(title)
-    plt.xlabel('Number of Shots (K)')
-    plt.ylabel('Performance (%)')
-    plt.grid(True)
-    plt.legend()
+            # Add data point labels
+            for j, (x, y) in enumerate(zip(shot_sizes, method_accs)):
+                if j == len(shot_sizes) - 1:  # Only label the last point to avoid clutter
+                    ax.annotate(f'{y:.1f}%', (x, y), xytext=(5, 0),
+                                textcoords='offset points', ha='left', fontsize=9)
+
+    # Styling
+    ax.set_title(title, fontsize=14, fontweight='bold', pad=10)
+    ax.set_xlabel('Number of Shots (K)', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Performance (%)', fontsize=12, fontweight='bold')
+    ax.grid(True, linestyle='--', alpha=0.7)
+    ax.legend(frameon=True, fancybox=True, shadow=True, fontsize=10)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(axis='both', which='major', width=1.5, length=5)
+
+    # Use integer ticks for shot sizes
+    ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+
     plt.tight_layout()
 
     if save_path:
@@ -247,9 +337,10 @@ def visualize_features(features, labels, title='t-SNE Feature Visualization',
         raise ValueError(f"不支持的降维方法: {method}")
 
     # 绘制散点图
-    plt.figure(figsize=figsize)
+    fig = plt.figure(figsize=figsize, facecolor='white')
+    ax = plt.subplot(111)
+
     unique_labels = np.unique(labels)
-    colors = plt.cm.rainbow(np.linspace(0, 1, len(unique_labels)))
 
     # 创建类名映射
     if class_names is None:
@@ -261,16 +352,24 @@ def visualize_features(features, labels, title='t-SNE Feature Visualization',
     for i, label in enumerate(unique_labels):
         mask = labels == label
         label_name = class_names.get(label, f"Class {label}")
-        plt.scatter(
+
+        # Use the specified color palette
+        color = COLORS[i % len(COLORS)]
+
+        ax.scatter(
             features_2d[mask, 0], features_2d[mask, 1],
-            c=[colors[i]], label=label_name,
-            alpha=0.7, edgecolors='k'
+            c=color, label=label_name, s=80, alpha=0.7,
+            edgecolors='k', linewidths=1
         )
 
-    # 添加标题和图例
-    plt.title(f"{title} ({method.upper()})")
-    plt.legend()
-    plt.grid(True)
+    # Styling
+    ax.set_title(f"{title} ({method.upper()})", fontsize=14, fontweight='bold', pad=10)
+    ax.grid(True, linestyle='--', alpha=0.7)
+    ax.legend(frameon=True, fancybox=True, shadow=True, fontsize=10)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(axis='both', which='major', width=1.5, length=5)
+
     plt.tight_layout()
 
     if save_path:
@@ -283,9 +382,9 @@ def visualize_features(features, labels, title='t-SNE Feature Visualization',
 
 
 def visualize_dynamic_graph(adjacency, save_path=None, title='Dynamic Graph Adjacency Matrix',
-                            threshold=None, figsize=(10, 8), show_network=True):
+                            threshold=None, figsize=(12, 10), show_network=True):
     """可视化动态图结构"""
-    plt.figure(figsize=figsize)
+    fig = plt.figure(figsize=figsize, facecolor='white')
 
     # 转换为numpy数组
     if isinstance(adjacency, torch.Tensor):
@@ -304,48 +403,73 @@ def visualize_dynamic_graph(adjacency, save_path=None, title='Dynamic Graph Adja
         ax1 = plt.subplot(gs[0])
         ax2 = plt.subplot(gs[1])
 
-        # 左侧：热力图
-        im = ax1.imshow(adj_viz, cmap='viridis')
-        ax1.set_title('Adjacency Matrix')
-        ax1.set_xlabel('Node Index')
-        ax1.set_ylabel('Node Index')
+        # Left: Adjacency Matrix Heatmap
+        # Custom colormap from white to blue
+        cmap = LinearSegmentedColormap.from_list('custom_blue', ['#FFFFFF', '#0783D5'])
+        im = ax1.imshow(adj_viz, cmap=cmap)
+        ax1.set_title('Adjacency Matrix', fontsize=14, fontweight='bold', pad=10)
+        ax1.set_xlabel('Node Index', fontsize=12, fontweight='bold')
+        ax1.set_ylabel('Node Index', fontsize=12, fontweight='bold')
+        ax1.tick_params(axis='both', which='major', width=1.5, length=5)
 
-        # 添加颜色条
+        # Add colorbar
         divider = make_axes_locatable(ax1)
-        cax = divider.append_axes("right", size="5%", pad=0.05)
+        cax = divider.append_axes("right", size="5%", pad=0.1)
         plt.colorbar(im, cax=cax)
 
-        # 右侧：网络图可视化
-        # 为了可视化效果，选择子矩阵的前N个节点
-        N = min(50, adj_viz.shape[0])  # 最多显示50个节点
+        # Right: Network Visualization
+        # For visualization, select the first N nodes
+        N = min(50, adj_viz.shape[0])  # Maximum 50 nodes for clarity
         sub_adj = adj_viz[:N, :N]
 
-        # 创建网络图
+        # Create network graph
         G = nx.from_numpy_array(sub_adj)
         pos = nx.spring_layout(G, seed=Config.seed)
 
-        # 计算边权重和节点度
+        # Calculate edge weights and node degrees
         edge_weights = [sub_adj[u, v] * 3 for u, v in G.edges()]
         node_degrees = [sum(sub_adj[i, :]) * 50 for i in range(N)]
 
-        # 绘制节点和边
-        nx.draw_networkx_nodes(G, pos, node_size=node_degrees, alpha=0.7,
-                               node_color=node_degrees, cmap='viridis', ax=ax2)
-        nx.draw_networkx_edges(G, pos, width=edge_weights, alpha=0.5, ax=ax2)
+        # Create a custom colormap for nodes
+        node_cmap = plt.cm.get_cmap('viridis')
+        # Draw nodes
+        nodes = nx.draw_networkx_nodes(G, pos, node_size=node_degrees, alpha=0.8,
+                                       node_color=node_degrees, cmap=node_cmap, ax=ax2)
 
-        # 添加节点标签（只显示少量标签）
+        # Draw edges with alpha proportional to weight
+        edges = nx.draw_networkx_edges(G, pos, width=edge_weights, alpha=0.6,
+                                       edge_color='gray', ax=ax2)
+
+        # Add node labels (only for a subset)
         labels = {i: str(i) for i in range(0, N, max(1, N // 10))}
-        nx.draw_networkx_labels(G, pos, labels, font_size=8, ax=ax2)
+        nx.draw_networkx_labels(G, pos, labels, font_size=10, font_weight='bold', ax=ax2)
 
-        ax2.set_title(f'Network Visualization (First {N} Nodes)')
+        ax2.set_title(f'Network Visualization (First {N} Nodes)',
+                      fontsize=14, fontweight='bold', pad=10)
         ax2.axis('off')
+
+        # Add a colorbar for the node colors
+        sm = plt.cm.ScalarMappable(cmap=node_cmap)
+        sm.set_array([])
+        cbar = plt.colorbar(sm, ax=ax2, orientation='vertical', pad=0.1,
+                            label='Node Degree')
+        cbar.set_label('Node Degree', fontsize=12, fontweight='bold')
+
     else:
         # 只显示热力图
-        im = plt.imshow(adj_viz, cmap='viridis')
-        plt.title(title)
-        plt.xlabel('Node Index')
-        plt.ylabel('Node Index')
-        plt.colorbar(im)
+        ax = plt.subplot(111)
+        # Custom colormap from white to blue
+        cmap = LinearSegmentedColormap.from_list('custom_blue', ['#FFFFFF', '#0783D5'])
+        im = ax.imshow(adj_viz, cmap=cmap)
+        ax.set_title(title, fontsize=14, fontweight='bold', pad=10)
+        ax.set_xlabel('Node Index', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Node Index', fontsize=12, fontweight='bold')
+        ax.tick_params(axis='both', which='major', width=1.5, length=5)
+
+        # Add colorbar
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes("right", size="5%", pad=0.1)
+        plt.colorbar(im, cax=cax)
 
     plt.tight_layout()
 
@@ -359,65 +483,74 @@ def visualize_dynamic_graph(adjacency, save_path=None, title='Dynamic Graph Adja
 def visualize_attention(data, attention_weights, title='Attention Weights',
                         save_path=None, figsize=(14, 8)):
     """可视化注意力权重"""
-    plt.figure(figsize=figsize)
-
-    # 上半部分：HRRP信号
-    plt.subplot(2, 1, 1)
+    fig = plt.figure(figsize=figsize, facecolor='white')
 
     # 确保数据是numpy数组
     if isinstance(data, torch.Tensor):
-        # 修改前: data_np = data.cpu().numpy().flatten()
-        # 修改后:
         data_np = data.detach().cpu().numpy().flatten()
     else:
         data_np = np.array(data).flatten()
 
     # 确保注意力权重是numpy数组
     if isinstance(attention_weights, torch.Tensor):
-        # 修改前: attn_np = attention_weights.cpu().numpy().flatten()
-        # 修改后:
         attn_np = attention_weights.detach().cpu().numpy().flatten()
     else:
         attn_np = np.array(attention_weights).flatten()
 
-    # 绘制HRRP信号
+    # 上半部分：HRRP信号
+    ax1 = plt.subplot(2, 1, 1)
     time_axis = np.arange(len(data_np))
-    plt.plot(time_axis, np.abs(data_np))
-    plt.title('HRRP Signal Magnitude')
-    plt.grid(True)
+    ax1.plot(time_axis, np.abs(data_np), color=COLORS[0], linewidth=2.5)
+    ax1.set_title('HRRP Signal Magnitude', fontsize=14, fontweight='bold', pad=10)
+    ax1.set_ylabel('Magnitude', fontsize=12, fontweight='bold')
+    ax1.grid(True, linestyle='--', alpha=0.7)
+    ax1.tick_params(axis='both', which='major', width=1.5, length=5)
+    ax1.spines['top'].set_visible(False)
+    ax1.spines['right'].set_visible(False)
 
     # 下半部分：注意力权重与信号叠加
-    plt.subplot(2, 1, 2)
+    ax2 = plt.subplot(2, 1, 2)
 
-    # 绘制信号
-    plt.plot(time_axis, np.abs(data_np), color='blue', alpha=0.5, label='HRRP Signal')
+    # 左侧Y轴：绘制信号
+    ax2.plot(time_axis, np.abs(data_np), color=COLORS[0], linewidth=2.5, alpha=0.5,
+             label='HRRP Signal')
+    ax2.set_xlabel('Range Cell', fontsize=12, fontweight='bold')
+    ax2.set_ylabel('Magnitude', fontsize=12, fontweight='bold')
+    ax2.tick_params(axis='both', which='major', width=1.5, length=5)
+    ax2.spines['top'].set_visible(False)
+    ax2.spines['right'].set_visible(False)
 
     # 右侧y轴：注意力权重
-    ax2 = plt.gca().twinx()
+    ax3 = ax2.twinx()
 
     # 根据注意力权重的维度调整
     if len(attn_np) == len(data_np):
         # 注意力和信号长度一致的情况
-        ax2.bar(time_axis, attn_np, alpha=0.3, color='red', label='Attention Weight')
+        ax3.bar(time_axis, attn_np, alpha=0.5, color=COLORS[1],
+                label='Attention Weight', width=1.0)
     else:
         # 注意力维度不一致时进行插值
-        # 这种情况可能发生在注意力应用于降采样后的特征
         interp_attn = np.interp(
             np.linspace(0, 1, len(data_np)),
             np.linspace(0, 1, len(attn_np)),
             attn_np
         )
-        ax2.bar(time_axis, interp_attn, alpha=0.3, color='red', label='Attention Weight')
+        ax3.bar(time_axis, interp_attn, alpha=0.5, color=COLORS[1],
+                label='Attention Weight', width=1.0)
 
-    # 设置标题和标签
-    plt.title(title)
-    plt.xlabel('Range Cell')
-    plt.grid(True)
+    ax3.set_ylabel('Attention Weight', fontsize=12, fontweight='bold')
+    ax3.tick_params(axis='y', labelcolor=COLORS[1])
+    ax3.spines['top'].set_visible(False)
+
+    # 设置标题
+    ax2.set_title(title, fontsize=14, fontweight='bold', pad=10)
+    ax2.grid(True, linestyle='--', alpha=0.7)
 
     # 设置图例
-    lines1, labels1 = plt.gca().get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax2.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
+    lines1, labels1 = ax2.get_legend_handles_labels()
+    lines2, labels2 = ax3.get_legend_handles_labels()
+    ax2.legend(lines1 + lines2, labels1 + labels2, loc='upper right',
+               frameon=True, fancybox=True, shadow=True)
 
     plt.tight_layout()
 
@@ -431,33 +564,47 @@ def visualize_attention(data, attention_weights, title='Attention Weights',
 def visualize_attention_heatmap(data, attention_matrix, title='Attention Heatmap',
                                 save_path=None, figsize=(15, 10)):
     """可视化注意力热力图"""
-    plt.figure(figsize=figsize)
+    fig = plt.figure(figsize=figsize, facecolor='white')
 
     # 确保数据是numpy数组
     if isinstance(data, torch.Tensor):
-        data_np = data.cpu().numpy().flatten()
+        data_np = data.detach().cpu().numpy().flatten()
     else:
         data_np = np.array(data).flatten()
 
     # 确保注意力矩阵是numpy数组
     if isinstance(attention_matrix, torch.Tensor):
-        attn_np = attention_matrix.cpu().numpy()
+        attn_np = attention_matrix.detach().cpu().numpy()
     else:
         attn_np = np.array(attention_matrix)
 
     # 上半部分：HRRP信号
-    plt.subplot(2, 1, 1)
-    plt.plot(np.abs(data_np))
-    plt.title('HRRP Signal Magnitude')
-    plt.grid(True)
+    ax1 = plt.subplot(2, 1, 1)
+    ax1.plot(np.abs(data_np), color=COLORS[0], linewidth=2.5)
+    ax1.set_title('HRRP Signal Magnitude', fontsize=14, fontweight='bold', pad=10)
+    ax1.set_ylabel('Magnitude', fontsize=12, fontweight='bold')
+    ax1.grid(True, linestyle='--', alpha=0.7)
+    ax1.tick_params(axis='both', which='major', width=1.5, length=5)
+    ax1.spines['top'].set_visible(False)
+    ax1.spines['right'].set_visible(False)
 
     # 下半部分：注意力热力图
-    plt.subplot(2, 1, 2)
-    im = plt.imshow(attn_np, aspect='auto', cmap='viridis')
-    plt.title(title)
-    plt.xlabel('Attention Target')
-    plt.ylabel('Attention Source')
-    plt.colorbar(im)
+    ax2 = plt.subplot(2, 1, 2)
+
+    # Custom colormap from white to blue
+    cmap = LinearSegmentedColormap.from_list('custom_attention', ['#FFFFFF', '#0783D5'])
+    im = ax2.imshow(attn_np, aspect='auto', cmap=cmap)
+
+    ax2.set_title(title, fontsize=14, fontweight='bold', pad=10)
+    ax2.set_xlabel('Attention Target', fontsize=12, fontweight='bold')
+    ax2.set_ylabel('Attention Source', fontsize=12, fontweight='bold')
+    ax2.tick_params(axis='both', which='major', width=1.5, length=5)
+
+    # Add colorbar
+    divider = make_axes_locatable(ax2)
+    cax = divider.append_axes("right", size="5%", pad=0.1)
+    cbar = plt.colorbar(im, cax=cax)
+    cbar.set_label('Attention Weight', fontsize=12, fontweight='bold')
 
     plt.tight_layout()
 
@@ -600,19 +747,32 @@ def compute_cosine_annealing_lr(epoch, max_epochs, min_lr, max_lr):
 
 def plot_learning_rates(layer_lrs, save_path=None):
     """Plot the learning rates for different layers across steps"""
-    plt.figure(figsize=(12, 8))
+    fig = plt.figure(figsize=(12, 8), facecolor='white')
+    ax = plt.subplot(111)
 
-    for layer_name, step_lrs in layer_lrs.items():
+    for i, (layer_name, step_lrs) in enumerate(layer_lrs.items()):
         # Convert tensor values to numpy array
         if isinstance(step_lrs[0], torch.Tensor):
             step_lrs = [lr.item() for lr in step_lrs]
-        plt.plot(range(len(step_lrs)), step_lrs, marker='o', label=layer_name)
 
-    plt.title("Per-Layer Learning Rates")
-    plt.xlabel("Step")
-    plt.ylabel("Learning Rate")
-    plt.legend(loc='best')
-    plt.grid(True)
+        # Use colors from the palette
+        color = COLORS[i % len(COLORS)]
+
+        ax.plot(range(len(step_lrs)), step_lrs, marker='o', linewidth=2.5,
+                markersize=6, label=layer_name, color=color)
+
+    # Styling
+    ax.set_title("Per-Layer Learning Rates", fontsize=14, fontweight='bold', pad=10)
+    ax.set_xlabel("Step", fontsize=12, fontweight='bold')
+    ax.set_ylabel("Learning Rate", fontsize=12, fontweight='bold')
+    ax.legend(frameon=True, fancybox=True, shadow=True, fontsize=10)
+    ax.grid(True, linestyle='--', alpha=0.7)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(axis='both', which='major', width=1.5, length=5)
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+
+    plt.tight_layout()
 
     if save_path:
         plt.savefig(save_path, bbox_inches='tight', dpi=300)
@@ -880,53 +1040,74 @@ def visualize_model_parameters(model, save_path=None):
             layer_stats[layer_name]['data'].append(param_data)
 
     # Create visualization
-    fig = plt.figure(figsize=(15, 10))
+    fig = plt.figure(figsize=(15, 10), facecolor='white')
+    gs = gridspec.GridSpec(2, 2, width_ratios=[1, 1], height_ratios=[1, 1])
 
     # 1. Parameter count by layer
-    ax1 = plt.subplot(2, 2, 1)
+    ax1 = plt.subplot(gs[0, 0])
     layers = list(layer_stats.keys())
     param_counts = [layer_stats[layer]['count'] for layer in layers]
 
-    ax1.bar(range(len(layers)), param_counts)
+    # Use colors from the palette
+    colors = [COLORS[i % len(COLORS)] for i in range(len(layers))]
+
+    ax1.bar(range(len(layers)), param_counts, color=colors, alpha=0.8)
     ax1.set_xticks(range(len(layers)))
-    ax1.set_xticklabels(layers, rotation=45, ha='right')
-    ax1.set_title('Parameter Count by Layer')
-    ax1.set_ylabel('Count')
-    ax1.grid(axis='y')
+    ax1.set_xticklabels(layers, rotation=45, ha='right', fontsize=10)
+    ax1.set_title('Parameter Count by Layer', fontsize=14, fontweight='bold', pad=10)
+    ax1.set_ylabel('Count', fontsize=12, fontweight='bold')
+    ax1.grid(axis='y', linestyle='--', alpha=0.7)
+    ax1.spines['top'].set_visible(False)
+    ax1.spines['right'].set_visible(False)
+    ax1.tick_params(axis='both', which='major', width=1.5, length=5)
 
     # 2. Parameter statistics by layer
-    ax2 = plt.subplot(2, 2, 2)
+    ax2 = plt.subplot(gs[0, 1])
     means = [np.mean(layer_stats[layer]['mean']) for layer in layers]
     stds = [np.mean(layer_stats[layer]['std']) for layer in layers]
 
-    ax2.errorbar(range(len(layers)), means, yerr=stds, fmt='o', capsize=5)
+    ax2.errorbar(range(len(layers)), means, yerr=stds, fmt='o', capsize=5,
+                 linewidth=2, markersize=8, ecolor='gray')
+
+    for i, (x, y) in enumerate(zip(range(len(layers)), means)):
+        ax2.scatter([x], [y], s=100, color=colors[i])
+
     ax2.set_xticks(range(len(layers)))
-    ax2.set_xticklabels(layers, rotation=45, ha='right')
-    ax2.set_title('Parameter Mean and Std by Layer')
-    ax2.set_ylabel('Value')
-    ax2.grid(True)
+    ax2.set_xticklabels(layers, rotation=45, ha='right', fontsize=10)
+    ax2.set_title('Parameter Mean and Std by Layer', fontsize=14, fontweight='bold', pad=10)
+    ax2.set_ylabel('Value', fontsize=12, fontweight='bold')
+    ax2.grid(True, linestyle='--', alpha=0.7)
+    ax2.spines['top'].set_visible(False)
+    ax2.spines['right'].set_visible(False)
+    ax2.tick_params(axis='both', which='major', width=1.5, length=5)
 
     # 3. Parameter distribution histograms
-    ax3 = plt.subplot(2, 2, 3)
+    ax3 = plt.subplot(gs[1, 0])
     for i, layer in enumerate(layers):
         data = np.concatenate(layer_stats[layer]['data'])
-        ax3.hist(data, bins=50, alpha=0.3, label=layer)
+        ax3.hist(data, bins=50, alpha=0.6, label=layer, color=colors[i])
 
-    ax3.set_title('Parameter Distribution')
-    ax3.set_xlabel('Value')
-    ax3.set_ylabel('Frequency')
-    ax3.grid(True)
+    ax3.set_title('Parameter Distribution', fontsize=14, fontweight='bold', pad=10)
+    ax3.set_xlabel('Value', fontsize=12, fontweight='bold')
+    ax3.set_ylabel('Frequency', fontsize=12, fontweight='bold')
+    ax3.grid(True, linestyle='--', alpha=0.7)
+    ax3.spines['top'].set_visible(False)
+    ax3.spines['right'].set_visible(False)
+    ax3.tick_params(axis='both', which='major', width=1.5, length=5)
 
     # 4. Absolute mean by layer
-    ax4 = plt.subplot(2, 2, 4)
+    ax4 = plt.subplot(gs[1, 1])
     abs_means = [np.mean(layer_stats[layer]['abs_mean']) for layer in layers]
 
-    ax4.bar(range(len(layers)), abs_means)
+    ax4.bar(range(len(layers)), abs_means, color=colors, alpha=0.8)
     ax4.set_xticks(range(len(layers)))
-    ax4.set_xticklabels(layers, rotation=45, ha='right')
-    ax4.set_title('Absolute Mean by Layer')
-    ax4.set_ylabel('Absolute Mean')
-    ax4.grid(axis='y')
+    ax4.set_xticklabels(layers, rotation=45, ha='right', fontsize=10)
+    ax4.set_title('Absolute Mean by Layer', fontsize=14, fontweight='bold', pad=10)
+    ax4.set_ylabel('Absolute Mean', fontsize=12, fontweight='bold')
+    ax4.grid(axis='y', linestyle='--', alpha=0.7)
+    ax4.spines['top'].set_visible(False)
+    ax4.spines['right'].set_visible(False)
+    ax4.tick_params(axis='both', which='major', width=1.5, length=5)
 
     plt.tight_layout()
 

@@ -141,7 +141,7 @@ class Config:
 
     # 元学习优化分析配置
     meta_learning_ablation = {
-        'enabled': True,
+        'enabled': False,
         'per_layer_lr_enabled': [True, False],  # 是否使用每层学习率
         'per_step_lr_enabled': [True, False],  # 是否使用每步学习率
         'multi_step_loss_enabled': [True, False],  # 是否使用多步损失

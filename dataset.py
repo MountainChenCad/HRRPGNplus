@@ -9,6 +9,27 @@ import scipy.signal as signal
 from config import Config
 import matplotlib.pyplot as plt
 import h5py
+import matplotlib as mpl
+from matplotlib.ticker import MaxNLocator
+from matplotlib.gridspec import GridSpec
+
+# Define CVPR-quality color palette
+COLORS = ['#0783D5', '#E52119', '#FD751F', '#0E2D88', '#78196D',
+          '#C2C121', '#FC837E', '#00A6BC', '#025057', '#7E5505', '#77196C']
+
+# Set global matplotlib parameters
+plt.rcParams['font.family'] = 'DejaVu Sans'
+plt.rcParams['font.size'] = 11
+plt.rcParams['axes.linewidth'] = 1.5
+plt.rcParams['axes.labelsize'] = 12
+plt.rcParams['axes.labelweight'] = 'bold'
+plt.rcParams['xtick.major.width'] = 1.5
+plt.rcParams['ytick.major.width'] = 1.5
+plt.rcParams['xtick.labelsize'] = 10
+plt.rcParams['ytick.labelsize'] = 10
+plt.rcParams['legend.fontsize'] = 10
+plt.rcParams['figure.titlesize'] = 14
+plt.rcParams['axes.titlesize'] = 12
 
 
 class HRRPDataset(Dataset):
@@ -495,19 +516,43 @@ def visualize_dataset_statistics(dataset, save_path=None):
     """可视化数据集统计信息"""
     class_dist = dataset.get_class_distribution()
 
-    plt.figure(figsize=(12, 10))
+    fig = plt.figure(figsize=(12, 10), facecolor='white')
+    gs = GridSpec(2, 1, height_ratios=[1, 1])
 
     # 绘制类别分布
-    plt.subplot(2, 1, 1)
-    plt.bar(class_dist.keys(), class_dist.values())
-    plt.title('Class Distribution')
-    plt.xlabel('Class')
-    plt.ylabel('Number of Samples')
-    plt.xticks(rotation=45)
-    plt.grid(axis='y')
+    ax1 = plt.subplot(gs[0])
+    class_names = list(class_dist.keys())
+    counts = list(class_dist.values())
+
+    # Use colors from the palette
+    bars = ax1.bar(range(len(class_names)), counts,
+                   color=[COLORS[i % len(COLORS)] for i in range(len(class_names))],
+                   width=0.7, edgecolor='black', linewidth=1.5, alpha=0.8)
+
+    # Add count labels on top of bars
+    for bar in bars:
+        height = bar.get_height()
+        ax1.annotate(f'{height}',
+                     xy=(bar.get_x() + bar.get_width() / 2, height),
+                     xytext=(0, 3),  # 3 points vertical offset
+                     textcoords="offset points",
+                     ha='center', va='bottom', fontsize=10, fontweight='bold')
+
+    ax1.set_xticks(range(len(class_names)))
+    ax1.set_xticklabels(class_names, rotation=45, ha='right', fontsize=11, fontweight='bold')
+    ax1.set_title('Class Distribution', fontsize=14, fontweight='bold', pad=10)
+    ax1.set_xlabel('Class', fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Number of Samples', fontsize=12, fontweight='bold')
+    ax1.grid(axis='y', linestyle='--', alpha=0.7)
+    ax1.spines['top'].set_visible(False)
+    ax1.spines['right'].set_visible(False)
+    ax1.tick_params(axis='both', which='major', width=1.5, length=5)
+
+    # Use integer y-axis values
+    ax1.yaxis.set_major_locator(MaxNLocator(integer=True))
 
     # 绘制样本频谱
-    plt.subplot(2, 1, 2)
+    ax2 = plt.subplot(gs[1])
 
     # 随机选择每个类的一个样本
     class_samples = []
@@ -526,13 +571,16 @@ def visualize_dataset_statistics(dataset, save_path=None):
         fft_result = np.abs(np.fft.fft(sample))
         fft_result = fft_result[:len(fft_result) // 2]  # 只保留正频率部分
 
-        plt.plot(fft_result, label=name)
+        ax2.plot(fft_result, color=COLORS[i % len(COLORS)], linewidth=2.5, label=name)
 
-    plt.title('Sample Frequency Spectrum')
-    plt.xlabel('Frequency')
-    plt.ylabel('Magnitude')
-    plt.legend()
-    plt.grid(True)
+    ax2.set_title('Sample Frequency Spectrum', fontsize=14, fontweight='bold', pad=10)
+    ax2.set_xlabel('Frequency', fontsize=12, fontweight='bold')
+    ax2.set_ylabel('Magnitude', fontsize=12, fontweight='bold')
+    ax2.legend(loc='upper right', frameon=True, fancybox=True, shadow=True, fontsize=10)
+    ax2.grid(True, linestyle='--', alpha=0.7)
+    ax2.spines['top'].set_visible(False)
+    ax2.spines['right'].set_visible(False)
+    ax2.tick_params(axis='both', which='major', width=1.5, length=5)
 
     plt.tight_layout()
 
@@ -548,6 +596,7 @@ def visualize_data_augmentation(dataset, save_path=None):
     # 随机选择一个样本
     sample_idx = random.choice(range(len(dataset)))
     original_data, label = dataset[sample_idx]
+    class_name = dataset.all_classes[label]
 
     # 创建增强器
     augmenter = HRRPTransform(augment=True)
@@ -563,21 +612,27 @@ def visualize_data_augmentation(dataset, save_path=None):
     }
 
     # 可视化
-    plt.figure(figsize=(15, 10))
+    fig = plt.figure(figsize=(15, 10), facecolor='white')
+
+    # Main title with class information
+    plt.suptitle(f"Data Augmentation Examples (Class: {class_name})",
+                 fontsize=16, fontweight='bold', y=0.98)
 
     for i, (aug_name, aug_data) in enumerate(aug_types.items()):
-        plt.subplot(3, 2, i + 1)
-        plt.plot(aug_data.squeeze().numpy())
-        plt.title(aug_name)
-        plt.grid(True)
+        ax = plt.subplot(3, 2, i + 1)
+        ax.plot(aug_data.squeeze().numpy(), color=COLORS[i % len(COLORS)], linewidth=2.5)
+        ax.set_title(aug_name, fontsize=12, fontweight='bold', pad=10)
+        ax.grid(True, linestyle='--', alpha=0.7)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.tick_params(axis='both', which='major', width=1.5, length=5)
 
         if i % 2 == 0:
-            plt.ylabel("Amplitude")
+            ax.set_ylabel("Amplitude", fontsize=12, fontweight='bold')
         if i >= 4:
-            plt.xlabel("Range Cell")
+            ax.set_xlabel("Range Cell", fontsize=12, fontweight='bold')
 
-    plt.suptitle(f"Data Augmentation Examples (Class: {dataset.all_classes[label]})")
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 1, 0.96])  # Adjust layout to accommodate suptitle
 
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')

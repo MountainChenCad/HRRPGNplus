@@ -410,24 +410,174 @@ def test_model(model, test_task_generator, device, num_tasks=None, shot=None):
     return avg_accuracy * 100, ci95 * 100, all_accuracies, avg_f1 * 100
 
 
-def shot_experiment(model, test_task_generator, device, shot_sizes=None):
-    """不同shot下的性能实验"""
+def shot_experiment(models, task_generator, device, shot_sizes=None):
+    """
+    Run experiment with different shot sizes for multiple models
+
+    Args:
+        models: Dictionary of model_name -> model pairs or single model
+        task_generator: Task generator to sample tasks from
+        device: Device to run on
+        shot_sizes: List of shot sizes to test
+
+    Returns:
+        Dictionary with results for each model
+    """
+    from utils import compute_metrics, prepare_static_adjacency
+
+    # Handle single model case
+    if not isinstance(models, dict):
+        models = {'HRRPGraphNet': models}
+
+    # Default shot sizes if not specified
     if shot_sizes is None:
-        shot_sizes = [1, 4, 8, 16, 32]
+        shot_sizes = [1, 5, 10, 20]
 
-    results = []
-    ci_results = []
-    f1_results = []
+    # Filter to feasible shot sizes
+    max_k = task_generator.dataset.get_class_distribution()
+    min_samples = min([count for count in max_k.values() if count > 0])
+    feasible_shots = [k for k in shot_sizes if k < min_samples - 1]  # Need at least 1 for query
 
-    for shot in shot_sizes:
-        print(f"\nTesting with {shot}-shot:")
-        accuracy, ci, _, f1 = test_model(model, test_task_generator, device, num_tasks=100, shot=shot)
-        results.append(accuracy)
-        ci_results.append(ci)
-        f1_results.append(f1)
-        print(f"{shot}-shot Accuracy: {accuracy:.2f}% ± {ci:.2f}%, F1: {f1:.2f}%")
+    if not feasible_shots:
+        print("Warning: No feasible shot sizes. Using single shot.")
+        feasible_shots = [1]
 
-    return shot_sizes, results, ci_results, f1_results
+    print(f"Running shot experiment with sizes: {feasible_shots}")
+
+    # Initialize results
+    results = {
+        'shot_sizes': feasible_shots,
+        'models': {}
+    }
+
+    for model_name, model in models.items():
+        model = model.to(device)
+        model_accuracies = []
+        model_cis = []
+        model_f1s = []
+
+        # For each shot size
+        for k in feasible_shots:
+            print(f"\nTesting {model_name} with {k}-shot...")
+
+            # Update task generator
+            original_k_shot = task_generator.k_shot
+            original_q_query = task_generator.q_query
+            task_generator.k_shot = k
+            task_generator.q_query = min(original_q_query, min_samples - k)
+
+            # Run test
+            all_accuracies = []
+            all_preds = []
+            all_labels = []
+
+            # Test on multiple tasks
+            num_tasks = 100  # Config.num_tasks
+            for i in range(num_tasks):
+                try:
+                    # Generate task
+                    support_x, support_y, query_x, query_y = task_generator.generate_task()
+
+                    # Move to device
+                    support_x = support_x.to(device)
+                    support_y = support_y.to(device)
+                    query_x = query_x.to(device)
+                    query_y = query_y.to(device)
+
+                    # Fine-tune model (MAML-style)
+                    if hasattr(model, 'clone'):
+                        # MAML models have clone and adapt methods
+                        from train import MAMLPlusPlusTrainer
+                        temp_trainer = MAMLPlusPlusTrainer(model, device)
+                        adapted_model, _, _, _ = temp_trainer.inner_loop(support_x, support_y)
+                    else:
+                        # Non-MAML models - train on support set directly
+                        adapted_model = model
+
+                        # If it's a ProtoNet or MatchingNet, they handle support set directly
+                        if model_name in ['ProtoNet', 'MatchingNet']:
+                            # Skip adaptation - these models use support set at inference time
+                            pass
+                        else:
+                            # For regular models, fine-tune with basic SGD
+                            optimizer = torch.optim.SGD(adapted_model.parameters(), lr=0.01)
+                            criterion = torch.nn.CrossEntropyLoss()
+
+                            # Simple fine-tuning loop
+                            adapted_model.train()
+                            for _ in range(5):  # Simple 5-step fine-tuning
+                                optimizer.zero_grad()
+                                logits, _ = adapted_model(support_x)
+                                loss = criterion(logits, support_y)
+                                loss.backward()
+                                optimizer.step()
+
+                    # Evaluate on query set
+                    adapted_model.eval()
+                    batch_size, channels, seq_len = query_x.shape
+                    static_adj = prepare_static_adjacency(batch_size, seq_len, device)
+
+                    with torch.no_grad():
+                        if model_name == 'ProtoNet':
+                            # ProtoNet inference
+                            support_features = adapted_model(support_x)
+                            query_features = adapted_model(query_x)
+                            prototypes = adapted_model.compute_prototypes(
+                                support_features, support_y, task_generator.n_way)
+                            dists = adapted_model.compute_distances(query_features, prototypes)
+                            preds = torch.argmin(dists, dim=1)
+                        elif model_name == 'MatchingNet':
+                            # MatchingNet inference
+                            logits, _ = adapted_model(query_x, support_set=support_x,
+                                                      support_labels=support_y)
+                            preds = torch.argmax(logits, dim=1)
+                        else:
+                            # Standard inference
+                            logits, _ = adapted_model(query_x, static_adj)
+                            preds = torch.argmax(logits, dim=1)
+
+                        # Compute accuracy
+                        acc = (preds == query_y).float().mean().item()
+                        all_accuracies.append(acc)
+
+                        # Collect predictions and labels for F1 score
+                        all_preds.extend(preds.cpu().numpy())
+                        all_labels.extend(query_y.cpu().numpy())
+
+                except Exception as e:
+                    print(f"Error in task {i}: {e}")
+                    continue
+
+            # Compute metrics
+            avg_acc = np.mean(all_accuracies) * 100
+            std_acc = np.std(all_accuracies) * 100
+            ci = 1.96 * std_acc / np.sqrt(len(all_accuracies))
+
+            # Compute F1 score
+            from sklearn.metrics import f1_score
+            if len(set(all_labels)) > 1:  # Ensure we have at least 2 classes
+                f1 = f1_score(all_labels, all_preds, average='macro') * 100
+            else:
+                f1 = avg_acc  # If only one class, F1 equals accuracy
+
+            print(f"{model_name} {k}-shot accuracy: {avg_acc:.2f}% ± {ci:.2f}%, F1: {f1:.2f}%")
+
+            model_accuracies.append(avg_acc)
+            model_cis.append(ci)
+            model_f1s.append(f1)
+
+            # Restore original task generator settings
+            task_generator.k_shot = original_k_shot
+            task_generator.q_query = original_q_query
+
+        # Store results for this model
+        results['models'][model_name] = {
+            'accuracies': model_accuracies,
+            'confidence_intervals': model_cis,
+            'f1_scores': model_f1s
+        }
+
+    return results
 
 
 def ablation_study_lambda(model, test_task_generator, device, lambda_values=None):
@@ -1416,3 +1566,184 @@ def ablation_study_meta_learning(model, test_task_generator, device):
         plt.close()
 
     return results_data
+
+def computational_complexity_analysis(task_generator, device, save_dir=None):
+    """
+    Perform comprehensive computational complexity analysis on different models
+
+    Args:
+        task_generator: Task generator to create sample tasks
+        device: Device to run models on
+        save_dir: Directory to save results
+
+    Returns:
+        Dictionary of complexity metrics for different models
+    """
+    from utils import analyze_model_complexity, calculate_model_memory, timing_measurement
+    import pandas as pd
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import os
+    import torch
+    from thop import profile
+    from models import MDGN, CNNModel, LSTMModel, GCNModel, GATModel
+
+    # Create save directory if provided
+    if save_dir is None:
+        save_dir = os.path.join(Config.log_dir, 'computational_complexity')
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Create models to analyze
+    models = {
+        'HRRPGraphNet': MDGN(num_classes=Config.test_n_way),
+        'CNN': CNNModel(num_classes=Config.test_n_way),
+        'LSTM': LSTMModel(num_classes=Config.test_n_way),
+        'GCN': GCNModel(num_classes=Config.test_n_way),
+        'GAT': GATModel(num_classes=Config.test_n_way)
+    }
+
+    # Initialize results dictionary
+    results = {
+        'model_name': [],
+        'total_params': [],
+        'trainable_params': [],
+        'memory_mb': [],
+        'inference_time_ms': [],
+        'flops': [],
+        'macs': []
+    }
+
+    # Generate a sample task for analysis
+    support_x, support_y, query_x, query_y = task_generator.generate_task()
+    sample_input = query_x[0:1].to(device)  # Use a single sample for timing
+
+    # Compute statistics for each model
+    for name, model in models.items():
+        print(f"\nAnalyzing {name}...")
+        model = model.to(device)
+
+        # Parameter count
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+        # Memory usage
+        memory_mb = calculate_model_memory(model)
+
+        # Inference time
+        model.eval()
+        inference_time = timing_measurement(model, sample_input, device, num_runs=100)
+
+        # FLOPs and MACs calculation using thop
+        try:
+            batch_size, channels, seq_len = sample_input.shape
+            static_adj = prepare_static_adjacency(batch_size, seq_len, device)
+            flops, params = profile(model, inputs=(sample_input, static_adj), verbose=False)
+            macs = flops / 2  # Approximately half of FLOPs are MACs
+        except Exception as e:
+            print(f"Error calculating FLOPs for {name}: {e}")
+            flops = 0
+            macs = 0
+
+        # Add to results
+        results['model_name'].append(name)
+        results['total_params'].append(total_params)
+        results['trainable_params'].append(trainable_params)
+        results['memory_mb'].append(memory_mb)
+        results['inference_time_ms'].append(inference_time)
+        results['flops'].append(flops)
+        results['macs'].append(macs)
+
+        # Save detailed model analysis
+        layer_params, _ = analyze_model_complexity(model)
+        with open(os.path.join(save_dir, f'{name}_complexity.txt'), 'w') as f:
+            f.write(f"Model: {name}\n")
+            f.write(f"Total Parameters: {total_params:,}\n")
+            f.write(f"Trainable Parameters: {trainable_params:,}\n")
+            f.write(f"Memory Usage: {memory_mb:.2f} MB\n")
+            f.write(f"Inference Time: {inference_time:.2f} ms\n")
+            f.write(f"FLOPs: {flops:,}\n")
+            f.write(f"MACs: {macs:,}\n\n")
+            f.write("Parameter distribution by layer:\n")
+            for layer_name, num_params in layer_params.items():
+                percentage = (num_params / total_params) * 100
+                f.write(f"{layer_name}: {num_params:,} parameters ({percentage:.2f}%)\n")
+
+    # Create DataFrame and save to CSV
+    df = pd.DataFrame(results)
+    csv_path = os.path.join(save_dir, 'model_complexity_comparison.csv')
+    df.to_csv(csv_path, index=False)
+    print(f"Complexity results saved to {csv_path}")
+
+    # Create visualization charts
+    # 1. Parameter count comparison
+    plt.figure(figsize=(12, 6), facecolor='white')
+    ax = plt.subplot(111)
+    x = np.arange(len(models))
+    width = 0.35
+
+    # Use COLORS from global definitions
+    color1 = '#0783D5'  # COLORS[0]
+    color2 = '#E52119'  # COLORS[1]
+
+    ax.bar(x - width / 2, df['total_params'], width, label='Total Params', color=color1)
+    ax.bar(x + width / 2, df['trainable_params'], width, label='Trainable Params', color=color2)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(df['model_name'], rotation=45, ha='right')
+    ax.set_title('Model Parameter Count Comparison', fontsize=14, fontweight='bold', pad=10)
+    ax.set_ylabel('Number of Parameters', fontsize=12, fontweight='bold')
+    ax.legend(frameon=True, fancybox=True, shadow=True)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
+    ax.tick_params(axis='both', which='major', width=1.5, length=5)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, 'parameter_comparison.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # 2. Inference time comparison
+    plt.figure(figsize=(12, 6), facecolor='white')
+    ax = plt.subplot(111)
+
+    ax.bar(df['model_name'], df['inference_time_ms'], color='#FD751F')
+
+    ax.set_title('Model Inference Time Comparison', fontsize=14, fontweight='bold', pad=10)
+    ax.set_xlabel('Model', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Inference Time (ms)', fontsize=12, fontweight='bold')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
+    ax.tick_params(axis='both', which='major', width=1.5, length=5)
+
+    # Add time labels on top of bars
+    for i, v in enumerate(df['inference_time_ms']):
+        ax.text(i, v + 0.5, f"{v:.2f}ms", ha='center', fontsize=10, fontweight='bold')
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, 'inference_time_comparison.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # 3. Memory usage comparison
+    plt.figure(figsize=(12, 6), facecolor='white')
+    ax = plt.subplot(111)
+
+    ax.bar(df['model_name'], df['memory_mb'], color='#0E2D88')
+
+    ax.set_title('Model Memory Usage Comparison', fontsize=14, fontweight='bold', pad=10)
+    ax.set_xlabel('Model', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Memory Usage (MB)', fontsize=12, fontweight='bold')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
+    ax.tick_params(axis='both', which='major', width=1.5, length=5)
+
+    # Add memory labels on top of bars
+    for i, v in enumerate(df['memory_mb']):
+        ax.text(i, v + 0.5, f"{v:.2f}MB", ha='center', fontsize=10, fontweight='bold')
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, 'memory_usage_comparison.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+
+    return results

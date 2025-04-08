@@ -33,6 +33,24 @@ from utils import (
     create_model_summary, prepare_static_adjacency
 )
 
+# Define CVPR-quality color palette
+COLORS = ['#0783D5', '#E52119', '#FD751F', '#0E2D88', '#78196D',
+          '#C2C121', '#FC837E', '#00A6BC', '#025057', '#7E5505', '#77196C']
+
+# Set matplotlib parameters for CVPR-quality plots
+plt.rcParams['font.family'] = 'DejaVu Sans'
+plt.rcParams['font.size'] = 11
+plt.rcParams['axes.linewidth'] = 1.5
+plt.rcParams['axes.labelsize'] = 12
+plt.rcParams['axes.labelweight'] = 'bold'
+plt.rcParams['xtick.major.width'] = 1.5
+plt.rcParams['ytick.major.width'] = 1.5
+plt.rcParams['xtick.labelsize'] = 10
+plt.rcParams['ytick.labelsize'] = 10
+plt.rcParams['legend.fontsize'] = 10
+plt.rcParams['figure.titlesize'] = 14
+plt.rcParams['axes.titlesize'] = 12
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='HRRPGraphNet++ Experimental Framework')
@@ -417,43 +435,90 @@ def test(args, model=None, vis=False):
     with open(os.path.join(results_dir, 'standard_test_results.json'), 'w') as f:
         json.dump(test_results, f, indent=4)
 
-    # Perform shot experiment
-    if vis:
-        print("\nRunning shot experiment...")
-        # Determine feasible shot sizes
-        max_shot = max(1, test_min_samples - 1)  # At least 1 sample for query
+        # Perform shot experiment
+        if vis:
+            print("\nRunning shot experiment...")
+            # Determine feasible shot sizes
+            max_shot = max(1, test_min_samples - 1)  # At least 1 sample for query
 
-        # Adjust shot range based on available samples
-        feasible_shots = [s for s in [1, 5, 10, 20] if s < max_shot]
-        if not feasible_shots:
-            feasible_shots = [1]  # Use at least 1-shot
+            # Adjust shot range based on available samples
+            all_shots = [1, 5, 10, 20]
+            feasible_shots = [s for s in all_shots if s < max_shot]
+            if not feasible_shots:
+                feasible_shots = [1]  # Use at least 1-shot
 
-        print(f"Feasible shot values: {feasible_shots}")
+            print(f"Feasible shot values: {feasible_shots}")
 
-        shot_sizes, shot_results, shot_ci, shot_f1 = shot_experiment(model, test_task_generator, Config.device,
-                                                                     shot_sizes=feasible_shots)
+            # Initialize baseline models for comparison if requested
+            models_to_compare = {'HRRPGraphNet': model}
 
-        # Plot shot curve with error bars
-        plot_shot_curve(
-            shot_sizes, shot_results, ci=shot_ci, f1_scores=shot_f1,
-            title="Performance vs Number of Shots",
-            save_path=os.path.join(results_dir, 'shot_curve.png')
-        )
+            if args.baseline_models:
+                print("\nInitializing baseline models for comparison...")
 
-        # Save shot experiment results
-        shot_exp_results = {
-            'shot_sizes': shot_sizes,
-            'accuracies': shot_results,
-            'confidence_intervals': shot_ci,
-            'f1_scores': shot_f1
-        }
+                # Map of model names to classes
+                model_classes = {
+                    'CNN': CNNModel,
+                    'LSTM': LSTMModel,
+                    'GCN': GCNModel,
+                    'GAT': GATModel,
+                    'ProtoNet': ProtoNetModel,
+                    'MatchingNet': MatchingNetModel
+                }
 
-        with open(os.path.join(results_dir, 'shot_experiment_results.json'), 'w') as f:
-            json.dump(shot_exp_results, f, indent=4)
+                # Initialize requested baseline models
+                for model_name in args.baseline_models:
+                    if model_name in model_classes:
+                        try:
+                            print(f"Initializing {model_name} model...")
+                            models_to_compare[model_name] = model_classes[model_name](num_classes=Config.test_n_way)
+                            models_to_compare[model_name] = models_to_compare[model_name].to(Config.device)
+                        except Exception as e:
+                            print(f"Error initializing {model_name} model: {e}")
 
-        # Create experiment visualizations
-        print("\nGenerating model interpretability visualizations...")
-        visualize_model_interpretability(model, test_task_generator, Config.device)
+            # Run shot experiment for all models
+            shot_results = shot_experiment(models_to_compare, test_task_generator, Config.device,
+                                           shot_sizes=feasible_shots)
+
+            # Extract data for plotting
+            shot_sizes = shot_results['shot_sizes']
+            model_names = list(shot_results['models'].keys())
+            accuracies = [shot_results['models'][name]['accuracies'] for name in model_names]
+            cis = [shot_results['models'][name]['confidence_intervals'] for name in model_names]
+            f1_scores = [shot_results['models'][name]['f1_scores'] for name in model_names]
+
+            # Plot shot curve with error bars - for accuracy
+            plot_shot_curve(
+                shot_sizes, accuracies, methods=model_names,
+                title="Accuracy vs Number of Shots",
+                save_path=os.path.join(results_dir, 'shot_curve_accuracy.png')
+            )
+
+            # Plot shot curve for F1 scores
+            plot_shot_curve(
+                shot_sizes, f1_scores, methods=model_names,
+                title="F1 Score vs Number of Shots",
+                save_path=os.path.join(results_dir, 'shot_curve_f1.png')
+            )
+
+            # Save shot experiment results
+            shot_exp_results = {
+                'shot_sizes': shot_sizes,
+                'models': {}
+            }
+
+            for i, name in enumerate(model_names):
+                shot_exp_results['models'][name] = {
+                    'accuracies': accuracies[i],
+                    'confidence_intervals': cis[i],
+                    'f1_scores': f1_scores[i]
+                }
+
+            with open(os.path.join(results_dir, 'shot_experiment_results.json'), 'w') as f:
+                json.dump(shot_exp_results, f, indent=4)
+
+            # Create experiment visualizations
+            print("\nGenerating model interpretability visualizations...")
+            visualize_model_interpretability(model, test_task_generator, Config.device)
 
     # Generate summary report if requested
     if args.report:
@@ -572,15 +637,30 @@ def run_ablation_studies(args):
             model, test_task_generator, Config.device
         )
 
-        # Plot results
-        plt.figure(figsize=(10, 6))
-        plt.errorbar(lambda_values, lambda_results, yerr=lambda_ci, fmt='o-', capsize=5, label='Accuracy')
-        plt.plot(lambda_values, lambda_f1, 's--', label='F1 Score')
-        plt.title("Effect of Lambda Mixing Coefficient")
-        plt.xlabel("Lambda (Static Graph Weight)")
-        plt.ylabel("Performance (%)")
-        plt.grid(True)
-        plt.legend()
+        # Plot results with CVPR-quality styling
+        plt.figure(figsize=(10, 6), facecolor='white')
+        ax = plt.subplot(111)
+
+        # Plot accuracy with error bars
+        ax.errorbar(lambda_values, lambda_results, yerr=lambda_ci, fmt='o-',
+                    capsize=5, linewidth=2.5, markersize=8, color=COLORS[0],
+                    ecolor=COLORS[0], elinewidth=1.5, label='Accuracy')
+
+        # Plot F1 score
+        ax.plot(lambda_values, lambda_f1, 's--', linewidth=2.5, markersize=8,
+                color=COLORS[1], label='F1 Score')
+
+        # Styling
+        ax.set_title("Effect of Lambda Mixing Coefficient", fontsize=14, fontweight='bold', pad=10)
+        ax.set_xlabel("Lambda (Static Graph Weight)", fontsize=12, fontweight='bold')
+        ax.set_ylabel("Performance (%)", fontsize=12, fontweight='bold')
+        ax.grid(True, linestyle='--', alpha=0.7)
+        ax.legend(frameon=True, fancybox=True, shadow=True, fontsize=10)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.tick_params(axis='both', which='major', width=1.5, length=5)
+
+        plt.tight_layout()
         plt.savefig(os.path.join(ablation_dir, 'lambda_ablation.png'), dpi=300, bbox_inches='tight')
         plt.close()
 
@@ -602,22 +682,50 @@ def run_ablation_studies(args):
             model, test_task_generator, Config.device
         )
 
-        # Plot results
-        plt.figure(figsize=(10, 6))
+        # Plot results with CVPR-quality styling
+        plt.figure(figsize=(10, 6), facecolor='white')
+        ax = plt.subplot(111)
         x_pos = np.arange(len(graph_labels))
 
+        # Set width for bars
+        width = 0.35
+
         # Plot accuracy bars
-        plt.bar(x_pos - 0.2, graph_results, width=0.4, yerr=graph_ci, capsize=5, label='Accuracy', color='blue',
-                alpha=0.7)
+        accuracy_bars = ax.bar(x_pos - width / 2, graph_results, width=width,
+                               yerr=graph_ci, capsize=5, color=COLORS[0],
+                               alpha=0.8, label='Accuracy', edgecolor='black', linewidth=1.5)
 
         # Plot F1 bars
-        plt.bar(x_pos + 0.2, graph_f1, width=0.4, label='F1 Score', color='green', alpha=0.7)
+        f1_bars = ax.bar(x_pos + width / 2, graph_f1, width=width,
+                         color=COLORS[1], alpha=0.8, label='F1 Score',
+                         edgecolor='black', linewidth=1.5)
 
-        plt.xticks(x_pos, graph_labels)
-        plt.title('Performance Comparison: Graph Structure Types')
-        plt.ylabel('Performance (%)')
-        plt.grid(axis='y')
-        plt.legend()
+        # Add data labels on top of bars
+        for i, bar in enumerate(accuracy_bars):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width() / 2., height + 1,
+                    f'{height:.1f}%', ha='center', va='bottom',
+                    fontsize=9, fontweight='bold')
+
+        for i, bar in enumerate(f1_bars):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width() / 2., height + 1,
+                    f'{height:.1f}%', ha='center', va='bottom',
+                    fontsize=9, fontweight='bold')
+
+        # Styling
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(graph_labels, fontsize=10, fontweight='bold')
+        ax.set_title('Performance Comparison: Graph Structure Types',
+                     fontsize=14, fontweight='bold', pad=10)
+        ax.set_ylabel('Performance (%)', fontsize=12, fontweight='bold')
+        ax.grid(axis='y', linestyle='--', alpha=0.7)
+        ax.legend(frameon=True, fancybox=True, shadow=True, fontsize=10)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.tick_params(axis='both', which='major', width=1.5, length=5)
+
+        plt.tight_layout()
         plt.savefig(os.path.join(ablation_dir, 'dynamic_graph_ablation.png'), dpi=300, bbox_inches='tight')
         plt.close()
 
@@ -632,7 +740,6 @@ def run_ablation_studies(args):
         with open(os.path.join(ablation_dir, 'dynamic_graph_ablation_results.json'), 'w') as f:
             json.dump(graph_results_data, f, indent=4)
 
-    # 在 run_ablation_studies 函数中
     # Run meta-learning ablation study
     if ablation_type in ['all', 'meta_learning']:
         print("\nRunning meta-learning ablation study...")
@@ -680,15 +787,35 @@ def run_ablation_studies(args):
         model, test_task_generator, Config.device
     )
 
-    # Plot results
-    plt.figure(figsize=(10, 6))
-    plt.errorbar(noise_levels, noise_results, yerr=noise_ci, fmt='o-', capsize=5, label='Accuracy')
-    plt.plot(noise_levels, noise_f1, 's--', label='F1 Score')
-    plt.title("Noise Robustness Experiment")
-    plt.xlabel("SNR (dB)")
-    plt.ylabel("Performance (%)")
-    plt.grid(True)
-    plt.legend()
+    # Plot results with CVPR-quality styling
+    plt.figure(figsize=(10, 6), facecolor='white')
+    ax = plt.subplot(111)
+
+    # Plot accuracy with error bars
+    ax.errorbar(noise_levels, noise_results, yerr=noise_ci, fmt='o-',
+                capsize=5, linewidth=2.5, markersize=8, color=COLORS[0],
+                ecolor=COLORS[0], elinewidth=1.5, label='Accuracy')
+
+    # Plot F1 score
+    ax.plot(noise_levels, noise_f1, 's--', linewidth=2.5, markersize=8,
+            color=COLORS[1], label='F1 Score')
+
+    # Styling
+    ax.set_title("Noise Robustness Experiment", fontsize=14, fontweight='bold', pad=10)
+    ax.set_xlabel("SNR (dB)", fontsize=12, fontweight='bold')
+    ax.set_ylabel("Performance (%)", fontsize=12, fontweight='bold')
+    ax.grid(True, linestyle='--', alpha=0.7)
+    ax.legend(frameon=True, fancybox=True, shadow=True, fontsize=10, loc='lower right')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(axis='both', which='major', width=1.5, length=5)
+
+    # Add data points labels
+    for i, (x, y) in enumerate(zip(noise_levels, noise_results)):
+        ax.annotate(f'{y:.1f}%', (x, y), xytext=(0, 7),
+                    textcoords='offset points', ha='center', fontsize=9)
+
+    plt.tight_layout()
     plt.savefig(os.path.join(ablation_dir, 'noise_robustness.png'), dpi=300, bbox_inches='tight')
     plt.close()
 
@@ -863,15 +990,35 @@ def run_robustness_analysis(args):
         snr_ci.append(ci)
         snr_f1.append(f1)
 
-    # Plot SNR vs Accuracy curve
-    plt.figure(figsize=(10, 6))
-    plt.errorbar(snr_levels, snr_results, yerr=snr_ci, fmt='o-', capsize=5, label='Accuracy')
-    plt.plot(snr_levels, snr_f1, 's--', label='F1 Score')
-    plt.title("Noise Robustness Analysis")
-    plt.xlabel("Signal-to-Noise Ratio (dB)")
-    plt.ylabel("Performance (%)")
-    plt.grid(True)
-    plt.legend()
+    # Plot SNR vs Accuracy curve with CVPR-quality styling
+    plt.figure(figsize=(10, 6), facecolor='white')
+    ax = plt.subplot(111)
+
+    # Plot accuracy with error bars
+    ax.errorbar(snr_levels, snr_results, yerr=snr_ci, fmt='o-',
+                capsize=5, linewidth=2.5, markersize=8, color=COLORS[0],
+                ecolor=COLORS[0], elinewidth=1.5, label='Accuracy')
+
+    # Plot F1 score
+    ax.plot(snr_levels, snr_f1, 's--', linewidth=2.5, markersize=8,
+            color=COLORS[1], label='F1 Score')
+
+    # Styling
+    ax.set_title("Noise Robustness Analysis", fontsize=14, fontweight='bold', pad=10)
+    ax.set_xlabel("Signal-to-Noise Ratio (dB)", fontsize=12, fontweight='bold')
+    ax.set_ylabel("Performance (%)", fontsize=12, fontweight='bold')
+    ax.grid(True, linestyle='--', alpha=0.7)
+    ax.legend(frameon=True, fancybox=True, shadow=True, fontsize=10, loc='lower right')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(axis='both', which='major', width=1.5, length=5)
+
+    # Add data point labels
+    for i, (x, y) in enumerate(zip(snr_levels, snr_results)):
+        ax.annotate(f'{y:.1f}%', (x, y), xytext=(0, 7),
+                    textcoords='offset points', ha='center', fontsize=9)
+
+    plt.tight_layout()
     plt.savefig(os.path.join(robustness_dir, 'snr_robustness.png'), dpi=300, bbox_inches='tight')
     plt.close()
 
@@ -988,15 +1135,17 @@ def run_complexity_analysis(args):
     print("\nGenerating sample task for complexity analysis...")
     try:
         sample_task = test_task_generator.generate_task()
-        support_x, support_y, query_x, query_y = sample_task
-    except:
-        print("Error generating task. Please check dataset.")
+    except Exception as e:
+        print(f"Error generating task: {e}. Please check dataset.")
         return
 
     # Run computational complexity analysis
     print("\nRunning computational complexity analysis...")
-    complexity_results = computational_complexity_analysis(test_task_generator, Config.device)
+    complexity_results = computational_complexity_analysis(test_task_generator, Config.device, save_dir=complexity_dir)
 
+    print("\nComplexity analysis results:")
+    results_df = pd.DataFrame(complexity_results)
+    print(results_df.to_string(index=False))
     print(f"\nComplexity analysis completed. Results saved to {complexity_dir}")
 
 
