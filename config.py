@@ -95,8 +95,8 @@ class Config:
     # ==================== 实验配置 ====================
 
     # 实验评估配置
-    evaluation_shots = [1, 5, 10, 20]  # N-way K-shot设置的K值
-    evaluation_ways = [3, 5]  # N-way K-shot设置的N值
+    evaluation_shots = [1]  # [1, 5, 10, 20]
+    evaluation_ways = [3]  # N-way K-shot设置的N值
     evaluation_metrics = ['accuracy', 'f1_score', 'confusion_matrix']  # 评估指标
 
     # 噪声鲁棒性实验配置

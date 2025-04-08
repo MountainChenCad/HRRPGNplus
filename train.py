@@ -12,6 +12,7 @@ import pandas as pd
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, f1_score, confusion_matrix
 import matplotlib.pyplot as plt
 from config import Config
+from dataset import TaskGenerator
 from models import (
     MDGN, CNNModel, LSTMModel, GCNModel, GATModel,
     ProtoNetModel, MatchingNetModel, PCASVM, TemplateMatcher,
@@ -349,8 +350,8 @@ def test_model(model, test_task_generator, device, num_tasks=None, shot=None):
                 pred = torch.argmax(query_logits, dim=1)
 
                 # Collect predictions and labels
-                all_preds.extend(pred.cpu().numpy())
-                all_labels.extend(query_y.cpu().numpy())
+                all_preds.extend(pred.detach().cpu().numpy())
+                all_labels.extend(query_y.detach().cpu().numpy())
 
                 # Calculate accuracy
                 accuracy = (pred == query_y).float().mean().item()
@@ -358,7 +359,7 @@ def test_model(model, test_task_generator, device, num_tasks=None, shot=None):
                 total_accuracy += accuracy
 
                 # Calculate F1 score (macro)
-                f1 = f1_score(query_y.cpu().numpy(), pred.cpu().numpy(), average='macro')
+                f1 = f1_score(query_y.detach().cpu().numpy(), pred.detach().cpu().numpy(), average='macro')
                 all_f1_scores.append(f1)
 
         except Exception as e:
@@ -403,18 +404,18 @@ def shot_experiment(model, test_task_generator, device, shot_sizes=None):
         shot_sizes = [1, 4, 8, 16, 32]
 
     results = []
-    ci_results = []  # 新增
-    f1_results = []  # 新增
+    ci_results = []
+    f1_results = []
 
     for shot in shot_sizes:
         print(f"\nTesting with {shot}-shot:")
         accuracy, ci, _, f1 = test_model(model, test_task_generator, device, num_tasks=100, shot=shot)
         results.append(accuracy)
-        ci_results.append(ci)  # 新增
-        f1_results.append(f1)  # 新增
+        ci_results.append(ci)
+        f1_results.append(f1)
         print(f"{shot}-shot Accuracy: {accuracy:.2f}% ± {ci:.2f}%, F1: {f1:.2f}%")
 
-    return shot_sizes, results, ci_results, f1_results  # 修改为返回4个值
+    return shot_sizes, results, ci_results, f1_results
 
 
 def ablation_study_lambda(model, test_task_generator, device, lambda_values=None):
@@ -470,7 +471,7 @@ def ablation_study_lambda(model, test_task_generator, device, lambda_values=None
     plt.savefig(os.path.join(results_dir, 'lambda_ablation_plot.png'), dpi=300, bbox_inches='tight')
     plt.close()
 
-    return lambda_values, results
+    return lambda_values, results, ci_results, f1_results
 
 
 def ablation_study_dynamic_graph(model, test_task_generator, device):
@@ -565,7 +566,7 @@ def ablation_study_dynamic_graph(model, test_task_generator, device):
     plt.savefig(os.path.join(results_dir, 'graph_structure_plot.png'), dpi=300, bbox_inches='tight')
     plt.close()
 
-    return labels, results
+    return labels, results, ci_results, f1_results
 
 
 def ablation_study_gnn_architecture(model, test_task_generator, device):
@@ -680,8 +681,12 @@ def ablation_study_gnn_architecture(model, test_task_generator, device):
     return {
         'head_values': head_values,
         'head_results': head_results,
+        'head_ci': head_ci,
+        'head_f1': head_f1,
         'layer_values': layer_values,
-        'layer_results': layer_results
+        'layer_results': layer_results,
+        'layer_ci': layer_ci,
+        'layer_f1': layer_f1
     }
 
 
@@ -745,22 +750,21 @@ def noise_robustness_experiment(model, test_task_generator, device, noise_levels
     plt.savefig(os.path.join(results_dir, 'noise_robustness_plot.png'), dpi=300, bbox_inches='tight')
     plt.close()
 
-    return noise_levels, results
+    return noise_levels, results, ci_results, f1_results
 
 
-def compare_with_baselines(test_task_generator, device, shot=5):
+def compare_with_baselines(test_dataset, device, shot=5, baseline_models=None):
     """Compare HRRPGraphNet++ with baseline methods"""
     # Create results directory
     results_dir = os.path.join(Config.log_dir, 'baseline_comparison')
     os.makedirs(results_dir, exist_ok=True)
 
     # Set shot value for all experiments
-    original_k_shot = test_task_generator.k_shot
-    test_task_generator.k_shot = shot
+    test_task_generator = TaskGenerator(test_dataset, n_way=Config.test_n_way, k_shot=shot, q_query=Config.q_query)
 
     # Define models to compare
     num_classes = Config.test_n_way
-    models = {
+    available_models = {
         'HRRPGraphNet++': MDGN(num_classes=num_classes).to(device),
         'Static Graph': StaticGraphModel(num_classes=num_classes).to(device),
         'Dynamic Graph': DynamicGraphModel(num_classes=num_classes).to(device),
@@ -770,8 +774,19 @@ def compare_with_baselines(test_task_generator, device, shot=5):
         'GAT': GATModel(num_classes=num_classes).to(device)
     }
 
+    # Filter models based on baseline_models parameter
+    if baseline_models is not None:
+        models = {name: model for name, model in available_models.items() if name in baseline_models}
+        models['HRRPGraphNet++'] = available_models['HRRPGraphNet++']  # Always include our model
+    else:
+        models = available_models
+
     # Non-neural models (handle separately)
-    non_neural_models = ['PCA+SVM', 'Template Matching']
+    non_neural_models = []
+    if baseline_models is None or 'PCA+SVM' in baseline_models:
+        non_neural_models.append('PCA+SVM')
+    if baseline_models is None or 'Template Matching' in baseline_models:
+        non_neural_models.append('Template Matching')
 
     # Results storage
     results = []
@@ -823,101 +838,100 @@ def compare_with_baselines(test_task_generator, device, shot=5):
             continue
 
     # PCA+SVM
-    print("\nTesting PCA+SVM:")
-    pca_svm_accuracies = []
-    pca_svm_f1s = []
+    if 'PCA+SVM' in non_neural_models:
+        print("\nTesting PCA+SVM:")
+        pca_svm_accuracies = []
+        pca_svm_f1s = []
 
-    for task_idx, (support_x, support_y, query_x, query_y) in enumerate(all_tasks):
-        try:
-            # Convert to numpy
-            support_x_np = support_x.reshape(support_x.shape[0], -1).numpy()
-            support_y_np = support_y.numpy()
-            query_x_np = query_x.reshape(query_x.shape[0], -1).numpy()
-            query_y_np = query_y.numpy()
+        for task_idx, (support_x, support_y, query_x, query_y) in enumerate(all_tasks):
+            try:
+                # Convert to numpy
+                support_x_np = support_x.reshape(support_x.shape[0], -1).detach().numpy()
+                support_y_np = support_y.detach().numpy()
+                query_x_np = query_x.reshape(query_x.shape[0], -1).detach().numpy()
+                query_y_np = query_y.detach().numpy()
 
-            # Train PCA+SVM
-            pca_svm = PCASVM(n_components=min(50, support_x_np.shape[1]))
-            pca_svm.fit(support_x_np, support_y_np)
+                # Train PCA+SVM
+                pca_svm = PCASVM(n_components=min(50, support_x_np.shape[1]))
+                pca_svm.fit(support_x_np, support_y_np)
 
-            # Test
-            preds = pca_svm.predict(query_x_np)
-            accuracy = accuracy_score(query_y_np, preds)
-            f1 = f1_score(query_y_np, preds, average='macro')
+                # Test
+                preds = pca_svm.predict(query_x_np)
+                accuracy = accuracy_score(query_y_np, preds)
+                f1 = f1_score(query_y_np, preds, average='macro')
 
-            pca_svm_accuracies.append(accuracy)
-            pca_svm_f1s.append(f1)
+                pca_svm_accuracies.append(accuracy)
+                pca_svm_f1s.append(f1)
 
-        except Exception as e:
-            print(f"Error in PCA+SVM task {task_idx}: {e}")
-            continue
+            except Exception as e:
+                print(f"Error in PCA+SVM task {task_idx}: {e}")
+                continue
 
-    if pca_svm_accuracies:
-        pca_svm_acc = np.mean(pca_svm_accuracies) * 100
-        pca_svm_ci = 1.96 * np.std(pca_svm_accuracies) * 100 / np.sqrt(len(pca_svm_accuracies))
-        pca_svm_f1 = np.mean(pca_svm_f1s) * 100
+        if pca_svm_accuracies:
+            pca_svm_acc = np.mean(pca_svm_accuracies) * 100
+            pca_svm_ci = 1.96 * np.std(pca_svm_accuracies) * 100 / np.sqrt(len(pca_svm_accuracies))
+            pca_svm_f1 = np.mean(pca_svm_f1s) * 100
 
-        model_names.append('PCA+SVM')
-        results.append(pca_svm_acc)
-        ci_results.append(pca_svm_ci)
-        f1_results.append(pca_svm_f1)
+            model_names.append('PCA+SVM')
+            results.append(pca_svm_acc)
+            ci_results.append(pca_svm_ci)
+            f1_results.append(pca_svm_f1)
 
-        print(f"PCA+SVM: Accuracy: {pca_svm_acc:.2f}% ± {pca_svm_ci:.2f}%, F1: {pca_svm_f1:.2f}%")
-        results_data.append({
-            'Model': 'PCA+SVM',
-            'Accuracy': pca_svm_acc,
-            'CI': pca_svm_ci,
-            'F1': pca_svm_f1
-        })
+            print(f"PCA+SVM: Accuracy: {pca_svm_acc:.2f}% ± {pca_svm_ci:.2f}%, F1: {pca_svm_f1:.2f}%")
+            results_data.append({
+                'Model': 'PCA+SVM',
+                'Accuracy': pca_svm_acc,
+                'CI': pca_svm_ci,
+                'F1': pca_svm_f1
+            })
 
     # Template Matching
-    print("\nTesting Template Matching:")
-    tm_accuracies = []
-    tm_f1s = []
+    if 'Template Matching' in non_neural_models:
+        print("\nTesting Template Matching:")
+        tm_accuracies = []
+        tm_f1s = []
 
-    for task_idx, (support_x, support_y, query_x, query_y) in enumerate(all_tasks):
-        try:
-            # Convert to numpy
-            support_x_np = support_x.reshape(support_x.shape[0], -1).numpy()
-            support_y_np = support_y.numpy()
-            query_x_np = query_x.reshape(query_x.shape[0], -1).numpy()
-            query_y_np = query_y.numpy()
+        for task_idx, (support_x, support_y, query_x, query_y) in enumerate(all_tasks):
+            try:
+                # Convert to numpy
+                support_x_np = support_x.reshape(support_x.shape[0], -1).detach().numpy()
+                support_y_np = support_y.detach().numpy()
+                query_x_np = query_x.reshape(query_x.shape[0], -1).detach().numpy()
+                query_y_np = query_y.detach().numpy()
 
-            # Train Template Matcher
-            tm = TemplateMatcher(metric='correlation')
-            tm.fit(support_x_np, support_y_np)
+                # Train Template Matcher
+                tm = TemplateMatcher(metric='correlation')
+                tm.fit(support_x_np, support_y_np)
 
-            # Test
-            preds = tm.predict(query_x_np)
-            accuracy = accuracy_score(query_y_np, preds)
-            f1 = f1_score(query_y_np, preds, average='macro')
+                # Test
+                preds = tm.predict(query_x_np)
+                accuracy = accuracy_score(query_y_np, preds)
+                f1 = f1_score(query_y_np, preds, average='macro')
 
-            tm_accuracies.append(accuracy)
-            tm_f1s.append(f1)
+                tm_accuracies.append(accuracy)
+                tm_f1s.append(f1)
 
-        except Exception as e:
-            print(f"Error in Template Matching task {task_idx}: {e}")
-            continue
+            except Exception as e:
+                print(f"Error in Template Matching task {task_idx}: {e}")
+                continue
 
-    if tm_accuracies:
-        tm_acc = np.mean(tm_accuracies) * 100
-        tm_ci = 1.96 * np.std(tm_accuracies) * 100 / np.sqrt(len(tm_accuracies))
-        tm_f1 = np.mean(tm_f1s) * 100
+        if tm_accuracies:
+            tm_acc = np.mean(tm_accuracies) * 100
+            tm_ci = 1.96 * np.std(tm_accuracies) * 100 / np.sqrt(len(tm_accuracies))
+            tm_f1 = np.mean(tm_f1s) * 100
 
-        model_names.append('Template Matching')
-        results.append(tm_acc)
-        ci_results.append(tm_ci)
-        f1_results.append(tm_f1)
+            model_names.append('Template Matching')
+            results.append(tm_acc)
+            ci_results.append(tm_ci)
+            f1_results.append(tm_f1)
 
-        print(f"Template Matching: Accuracy: {tm_acc:.2f}% ± {tm_ci:.2f}%, F1: {tm_f1:.2f}%")
-        results_data.append({
-            'Model': 'Template Matching',
-            'Accuracy': tm_acc,
-            'CI': tm_ci,
-            'F1': tm_f1
-        })
-
-    # Restore original shot value
-    test_task_generator.k_shot = original_k_shot
+            print(f"Template Matching: Accuracy: {tm_acc:.2f}% ± {tm_ci:.2f}%, F1: {tm_f1:.2f}%")
+            results_data.append({
+                'Model': 'Template Matching',
+                'Accuracy': tm_acc,
+                'CI': tm_ci,
+                'F1': tm_f1
+            })
 
     # Save results to CSV
     results_df = pd.DataFrame(results_data)
@@ -1000,21 +1014,22 @@ def visualize_model_interpretability(model, test_task_generator, device):
             sample_x = query_x[i:i + 1]
             sample_y = query_y[i:i + 1]
 
-            # 重要修复：为单个样本创建正确大小的邻接矩阵
+            # 创建匹配单个样本批次大小的邻接矩阵
             sample_static_adj = prepare_static_adjacency(1, seq_len, device)
 
             # Forward pass with attention extraction
-            logits, features, adj_matrix, attention_weights = updated_model(
-                sample_x, sample_static_adj, return_features=True, extract_attention=True
-            )
+            with torch.no_grad():
+                logits, features, adj_matrix, attention_weights = updated_model(
+                    sample_x, sample_static_adj, return_features=True, extract_attention=True
+                )
 
-            pred = torch.argmax(logits, dim=1).cpu().numpy()[0]
-            true_label = sample_y.cpu().numpy()[0]
+            pred = torch.argmax(logits, dim=1).detach().cpu().numpy()[0]
+            true_label = sample_y.detach().cpu().numpy()[0]
 
             # Visualize attention weights
             visualize_attention(
-                sample_x.cpu(),
-                attention_weights.cpu(),
+                sample_x.detach().cpu(),
+                attention_weights.detach().cpu(),
                 title=f'Sample {i + 1}: True: {true_label}, Pred: {pred}',
                 save_path=os.path.join(task_dir, f'attention_sample_{i + 1}.png')
             )
@@ -1025,15 +1040,16 @@ def visualize_model_interpretability(model, test_task_generator, device):
         sample_idx = np.random.randint(0, batch_size)
         sample_x = query_x[sample_idx:sample_idx + 1]
 
-        # 重要修复：为单个样本创建正确大小的邻接矩阵
+        # 创建匹配单个样本批次大小的邻接矩阵
         sample_static_adj = prepare_static_adjacency(1, seq_len, device)
 
         # Forward pass to get adjacency matrix
-        _, adj_matrix = updated_model(sample_x, sample_static_adj)
+        with torch.no_grad():
+            _, adj_matrix = updated_model(sample_x, sample_static_adj)
 
         # Visualize adjacency matrix
         visualize_dynamic_graph(
-            adj_matrix[0].cpu(),  # First sample in batch
+            adj_matrix[0].detach().cpu(),  # First sample in batch
             save_path=os.path.join(task_dir, 'dynamic_graph_structure.png')
         )
 
@@ -1043,17 +1059,20 @@ def visualize_model_interpretability(model, test_task_generator, device):
         batch_features = []
         batch_labels = []
 
-        for i in range(batch_size):
-            sample_x = query_x[i:i + 1]
-            sample_y = query_y[i:i + 1]
+        with torch.no_grad():
+            # 为每个样本单独处理
+            for i in range(batch_size):
+                sample_x = query_x[i:i + 1]
+                sample_y = query_y[i:i + 1]
 
-            sample_static_adj = prepare_static_adjacency(1, seq_len, device)
+                # 创建匹配单个样本批次大小的邻接矩阵
+                sample_static_adj = prepare_static_adjacency(1, seq_len, device)
 
-            # Forward pass to extract features
-            _, features = updated_model(sample_x, sample_static_adj, return_features=True)[0:2]
+                # Forward pass to extract features
+                _, features = updated_model(sample_x, sample_static_adj, return_features=True)[0:2]
 
-            batch_features.append(features.cpu().numpy())
-            batch_labels.append(sample_y.cpu().numpy()[0])
+                batch_features.append(features.detach().cpu().numpy())
+                batch_labels.append(sample_y.detach().cpu().numpy()[0])
 
         # Stack features and visualize
         batch_features = np.vstack(batch_features)
@@ -1069,7 +1088,7 @@ def visualize_model_interpretability(model, test_task_generator, device):
     print(f"\nAll visualizations saved to {vis_dir}")
 
 
-def computational_complexity_analysis(model, test_task_generator, device):
+def computational_complexity_analysis(test_task_generator, device):
     """Analyze computational complexity of the model"""
     # Create results directory
     results_dir = os.path.join(Config.log_dir, 'computational_complexity')
