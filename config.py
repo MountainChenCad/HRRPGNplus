@@ -36,7 +36,7 @@ class Config:
     # 模型配置
     hidden_channels = 64
     attention_heads = 4
-    graph_conv_layers = 2 # 3
+    graph_conv_layers = 3 # 3
     dropout = 0.1
 
     # 动态图配置
@@ -49,7 +49,7 @@ class Config:
     inner_steps = 5  # 内循环更新步数
     task_batch_size = 1  # 4
     max_epochs = 300  # 最大迭代轮次
-    patience = 20  # 100
+    patience = 100  # 100
 
     # MAML++ 多步骤损失权重
     # 按步骤递增的权重，越靠后的步骤权重越大

@@ -23,7 +23,7 @@ from train import (
     MAMLPlusPlusTrainer as MAMLTrainer, test_model, shot_experiment,
     ablation_study_lambda, ablation_study_dynamic_graph, ablation_study_gnn_architecture,
     noise_robustness_experiment, compare_with_baselines, ablation_study_meta_learning,
-    visualize_model_interpretability, computational_complexity_analysis
+    visualize_model_interpretability, computational_complexity_analysis, compare_models_across_shots
 )
 from utils import (
     plot_learning_curve, plot_shot_curve, plot_confusion_matrix,
@@ -857,6 +857,16 @@ def compare_baseline_models(args):
     if args.shot is not None:
         Config.k_shot = args.shot
 
+    # Determine baseline models to compare
+    baseline_models = args.baseline_models
+    if baseline_models is None:
+        # Use all available methods from config
+        traditional_models = Config.traditional_baselines['methods'] if Config.traditional_baselines['enabled'] else []
+        dl_models = Config.dl_baselines['methods'] if Config.dl_baselines['enabled'] else []
+        fsl_models = Config.fsl_baselines['methods'] if Config.fsl_baselines['enabled'] else []
+
+        baseline_models = traditional_models + dl_models + fsl_models
+
     # Create baseline results directory
     baseline_dir = os.path.join(Config.log_dir, 'baseline_comparison')
     os.makedirs(baseline_dir, exist_ok=True)
@@ -865,13 +875,93 @@ def compare_baseline_models(args):
     print(f"\nComparing with baseline models using {Config.k_shot}-shot setting...")
     comparison_results = compare_with_baselines(
         test_dataset, Config.device, shot=Config.k_shot,
-        baseline_models=args.baseline_models
+        baseline_models=baseline_models
     )
 
     # Save comparison results
     comparison_results.to_csv(os.path.join(baseline_dir, f'baseline_comparison_{Config.k_shot}shot.csv'), index=False)
 
+    # Create bar chart visualization
+    if comparison_results is not None and not comparison_results.empty:
+        # Extract accuracy values (removing % and ± parts)
+        accuracy_values = []
+        model_names = []
+        ci_values = []
+
+        for _, row in comparison_results.iterrows():
+            model_names.append(row['model'])
+            acc_text = row['accuracy']
+            acc_parts = acc_text.split('±')
+            acc_value = float(acc_parts[0].strip().replace('%', ''))
+            ci_value = float(acc_parts[1].strip().replace('%', '')) if len(acc_parts) > 1 else 0
+            accuracy_values.append(acc_value)
+            ci_values.append(ci_value)
+
+        # Create bar chart
+        plt.figure(figsize=(12, 6), facecolor='white')
+        x_pos = np.arange(len(model_names))
+
+        ax = plt.subplot(111)
+        bars = ax.bar(x_pos, accuracy_values, yerr=ci_values, capsize=5,
+                      color=[COLORS[i % len(COLORS)] for i in range(len(model_names))],
+                      width=0.6, edgecolor='black', linewidth=1.5)
+
+        # Add accuracy values on top of bars
+        for i, (bar, value) in enumerate(zip(bars, accuracy_values)):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width() / 2., height + ci_values[i] + 1,
+                    f'{value:.1f}%', ha='center', va='bottom', fontsize=10, fontweight='bold')
+
+        # Styling
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(model_names, rotation=45, ha='right', fontsize=10, fontweight='bold')
+        ax.set_title(f'Model Comparison ({Config.k_shot}-shot)', fontsize=14, fontweight='bold', pad=10)
+        ax.set_ylabel('Accuracy (%)', fontsize=12, fontweight='bold')
+        ax.grid(axis='y', linestyle='--', alpha=0.7)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.tick_params(axis='both', which='major', width=1.5, length=5)
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(baseline_dir, f'model_comparison_{Config.k_shot}shot.png'), dpi=300,
+                    bbox_inches='tight')
+        plt.close()
+
     print(f"\nBaseline comparison results saved to {baseline_dir}")
+
+    # If visualization is enabled, also run shot experiment for multiple models
+    if args.vis and baseline_models:
+        # Run shot comparison across different k values
+        shot_dir = os.path.join(baseline_dir, 'shot_comparison')
+        os.makedirs(shot_dir, exist_ok=True)
+
+        # Determine feasible shot sizes
+        test_min_samples = float('inf')
+        for class_idx in test_dataset.class_samples:
+            samples_count = len(test_dataset.class_samples[class_idx])
+            if samples_count < test_min_samples:
+                test_min_samples = samples_count
+
+        max_shot = max(1, test_min_samples - 1)  # At least 1 sample for query
+        all_shots = [1, 5, 10, 20]
+        feasible_shots = [s for s in all_shots if s < max_shot]
+        if not feasible_shots:
+            feasible_shots = [1]  # Use at least 1-shot
+
+        print(f"\nRunning shot comparison with sizes: {feasible_shots}")
+
+        # Prepare results with shot experiment - use the renamed function
+        shot_results = compare_models_across_shots(
+            test_dataset, Config.device,
+            baseline_models=baseline_models,
+            shot_sizes=feasible_shots
+        )
+
+        # Save shot comparison results
+        with open(os.path.join(shot_dir, 'shot_comparison_results.json'), 'w') as f:
+            json.dump(shot_results, f, indent=4)
+
+        print(f"Shot comparison results saved to {shot_dir}")
 
 
 def run_robustness_analysis(args):

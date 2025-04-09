@@ -10,6 +10,7 @@ import copy
 import math
 import time
 import pandas as pd
+from matplotlib.ticker import MaxNLocator
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, f1_score, confusion_matrix
 import matplotlib.pyplot as plt
 from config import Config
@@ -24,6 +25,23 @@ from utils import (
     visualize_features, visualize_dynamic_graph, visualize_attention, plot_confusion_matrix
 )
 
+# Define CVPR-quality color palette
+COLORS = ['#0783D5', '#E52119', '#FD751F', '#0E2D88', '#78196D',
+          '#C2C121', '#FC837E', '#00A6BC', '#025057', '#7E5505', '#77196C']
+
+# Set global matplotlib parameters
+plt.rcParams['font.family'] = 'DejaVu Sans'
+plt.rcParams['font.size'] = 11
+plt.rcParams['axes.linewidth'] = 1.5
+plt.rcParams['axes.labelsize'] = 12
+plt.rcParams['axes.labelweight'] = 'bold'
+plt.rcParams['xtick.major.width'] = 1.5
+plt.rcParams['ytick.major.width'] = 1.5
+plt.rcParams['xtick.labelsize'] = 10
+plt.rcParams['ytick.labelsize'] = 10
+plt.rcParams['legend.fontsize'] = 10
+plt.rcParams['figure.titlesize'] = 14
+plt.rcParams['axes.titlesize'] = 12
 
 class MAMLPlusPlusTrainer:
     """MAML++ trainer with enhanced features"""
@@ -528,9 +546,10 @@ def shot_experiment(models, task_generator, device, shot_sizes=None):
                             preds = torch.argmin(dists, dim=1)
                         elif model_name == 'MatchingNet':
                             # MatchingNet inference
-                            logits, _ = adapted_model(query_x, support_set=support_x,
-                                                      support_labels=support_y)
-                            preds = torch.argmax(logits, dim=1)
+                            logits, _ = model(query_x, support_set=support_x, support_labels=support_y)
+
+                            # Get predictions
+                            _, preds = torch.max(logits, 1)
                         else:
                             # Standard inference
                             logits, _ = adapted_model(query_x, static_adj)
@@ -635,6 +654,309 @@ def ablation_study_lambda(model, test_task_generator, device, lambda_values=None
 
     return lambda_values, results, ci_results, f1_results
 
+
+def shot_experiment(dataset, device, baseline_models=None, shot_sizes=None):
+    """
+    Compare models across different shot sizes
+
+    Args:
+        dataset: Test dataset
+        device: Device to run models on
+        baseline_models: List of baseline models to compare
+        shot_sizes: List of shot sizes to test
+
+    Returns:
+        Dictionary with results for each model and shot size
+    """
+    # Default shot sizes if not specified
+    if shot_sizes is None:
+        shot_sizes = [1, 5, 10, 20]
+
+    # Filter to feasible shot sizes
+    max_k = dataset.get_class_distribution()
+    min_samples = min([count for count in max_k.values() if count > 0])
+    feasible_shots = [k for k in shot_sizes if k < min_samples - 1]  # Need at least 1 for query
+
+    if not feasible_shots:
+        print("Warning: No feasible shot sizes. Using single shot.")
+        feasible_shots = [1]
+
+    # Initialize results
+    results = {
+        'shot_sizes': feasible_shots,
+        'models': {}
+    }
+
+    # Run comparison for each shot size
+    for k_shot in feasible_shots:
+        print(f"\nComparing models with {k_shot}-shot...")
+
+        # Run baseline comparison for this shot value
+        comparison_results = compare_with_baselines(
+            dataset, device, shot=k_shot,
+            baseline_models=baseline_models,
+            num_tasks=50  # Use fewer tasks for efficiency
+        )
+
+        # Extract results
+        for _, row in comparison_results.iterrows():
+            model_name = row['model']
+
+            # Initialize model entry if not exists
+            if model_name not in results['models']:
+                results['models'][model_name] = {
+                    'accuracies': [],
+                    'confidence_intervals': [],
+                    'f1_scores': []
+                }
+
+            # Parse accuracy and confidence interval
+            acc_text = row['accuracy']
+            acc_parts = acc_text.split('±')
+            acc_value = float(acc_parts[0].strip().replace('%', ''))
+            ci_value = float(acc_parts[1].strip().replace('%', '')) if len(acc_parts) > 1 else 0
+
+            # Parse F1 score
+            f1_value = float(row['f1_score'].replace('%', ''))
+
+            # Add to results
+            results['models'][model_name]['accuracies'].append(acc_value)
+            results['models'][model_name]['confidence_intervals'].append(ci_value)
+            results['models'][model_name]['f1_scores'].append(f1_value)
+
+    # Generate plots
+    # 1. Accuracy plot
+    plt.figure(figsize=(12, 6), facecolor='white')
+    ax = plt.subplot(111)
+
+    model_names = list(results['models'].keys())
+    markers = ['o', 's', '^', 'D', 'v', '<', '>', 'p', '*', 'h']
+
+    for i, model_name in enumerate(model_names):
+        model_data = results['models'][model_name]
+        color = COLORS[i % len(COLORS)]
+        marker = markers[i % len(markers)]
+
+        ax.errorbar(
+            feasible_shots,
+            model_data['accuracies'],
+            yerr=model_data['confidence_intervals'],
+            fmt=f'-{marker}',
+            linewidth=2.5,
+            markersize=8,
+            capsize=5,
+            label=model_name,
+            color=color
+        )
+
+    # Styling
+    ax.set_title('Model Accuracy vs Number of Shots', fontsize=14, fontweight='bold', pad=10)
+    ax.set_xlabel('Number of Shots (K)', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Accuracy (%)', fontsize=12, fontweight='bold')
+    ax.grid(True, linestyle='--', alpha=0.7)
+    ax.legend(frameon=True, fancybox=True, shadow=True, fontsize=10)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(axis='both', which='major', width=1.5, length=5)
+
+    # Use integer ticks for shot sizes
+    ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(Config.log_dir, 'baseline_comparison', 'shot_comparison', 'accuracy_vs_shots.png'),
+                dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # 2. F1 score plot
+    plt.figure(figsize=(12, 6), facecolor='white')
+    ax = plt.subplot(111)
+
+    for i, model_name in enumerate(model_names):
+        model_data = results['models'][model_name]
+        color = COLORS[i % len(COLORS)]
+        marker = markers[i % len(markers)]
+
+        ax.plot(
+            feasible_shots,
+            model_data['f1_scores'],
+            f'-{marker}',
+            linewidth=2.5,
+            markersize=8,
+            label=model_name,
+            color=color
+        )
+
+    # Styling
+    ax.set_title('Model F1 Score vs Number of Shots', fontsize=14, fontweight='bold', pad=10)
+    ax.set_xlabel('Number of Shots (K)', fontsize=12, fontweight='bold')
+    ax.set_ylabel('F1 Score (%)', fontsize=12, fontweight='bold')
+    ax.grid(True, linestyle='--', alpha=0.7)
+    ax.legend(frameon=True, fancybox=True, shadow=True, fontsize=10)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(axis='both', which='major', width=1.5, length=5)
+
+    # Use integer ticks for shot sizes
+    ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(Config.log_dir, 'baseline_comparison', 'shot_comparison', 'f1_vs_shots.png'),
+                dpi=300, bbox_inches='tight')
+    plt.close()
+
+    return results
+
+
+def compare_models_across_shots(dataset, device, baseline_models=None, shot_sizes=None):
+    """
+    Compare models across different shot sizes
+
+    Args:
+        dataset: Test dataset
+        device: Device to run models on
+        baseline_models: List of baseline models to compare
+        shot_sizes: List of shot sizes to test
+
+    Returns:
+        Dictionary with results for each model and shot size
+    """
+    # Default shot sizes if not specified
+    if shot_sizes is None:
+        shot_sizes = [1, 5, 10, 20]
+
+    # Filter to feasible shot sizes
+    class_dist = dataset.get_class_distribution()
+    min_samples = min([count for count in class_dist.values() if count > 0])
+    feasible_shots = [k for k in shot_sizes if k < min_samples - 1]  # Need at least 1 for query
+
+    if not feasible_shots:
+        print("Warning: No feasible shot sizes. Using single shot.")
+        feasible_shots = [1]
+
+    # Initialize results
+    results = {
+        'shot_sizes': feasible_shots,
+        'models': {}
+    }
+
+    # Run comparison for each shot size
+    for k_shot in feasible_shots:
+        print(f"\nComparing models with {k_shot}-shot...")
+
+        # Run baseline comparison for this shot value
+        comparison_results = compare_with_baselines(
+            dataset, device, shot=k_shot,
+            baseline_models=baseline_models,
+            num_tasks=50  # Use fewer tasks for efficiency
+        )
+
+        # Extract results
+        for _, row in comparison_results.iterrows():
+            model_name = row['model']
+
+            # Initialize model entry if not exists
+            if model_name not in results['models']:
+                results['models'][model_name] = {
+                    'accuracies': [],
+                    'confidence_intervals': [],
+                    'f1_scores': []
+                }
+
+            # Parse accuracy and confidence interval
+            acc_text = row['accuracy']
+            acc_parts = acc_text.split('±')
+            acc_value = float(acc_parts[0].strip().replace('%', ''))
+            ci_value = float(acc_parts[1].strip().replace('%', '')) if len(acc_parts) > 1 else 0
+
+            # Parse F1 score
+            f1_value = float(row['f1_score'].replace('%', ''))
+
+            # Add to results
+            results['models'][model_name]['accuracies'].append(acc_value)
+            results['models'][model_name]['confidence_intervals'].append(ci_value)
+            results['models'][model_name]['f1_scores'].append(f1_value)
+
+    # Generate plots
+    # 1. Accuracy plot
+    plt.figure(figsize=(12, 6), facecolor='white')
+    ax = plt.subplot(111)
+
+    model_names = list(results['models'].keys())
+    markers = ['o', 's', '^', 'D', 'v', '<', '>', 'p', '*', 'h']
+
+    for i, model_name in enumerate(model_names):
+        model_data = results['models'][model_name]
+        color = COLORS[i % len(COLORS)]
+        marker = markers[i % len(markers)]
+
+        ax.errorbar(
+            feasible_shots,
+            model_data['accuracies'],
+            yerr=model_data['confidence_intervals'],
+            fmt=f'-{marker}',
+            linewidth=2.5,
+            markersize=8,
+            capsize=5,
+            label=model_name,
+            color=color
+        )
+
+    # Styling
+    ax.set_title('Model Accuracy vs Number of Shots', fontsize=14, fontweight='bold', pad=10)
+    ax.set_xlabel('Number of Shots (K)', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Accuracy (%)', fontsize=12, fontweight='bold')
+    ax.grid(True, linestyle='--', alpha=0.7)
+    ax.legend(frameon=True, fancybox=True, shadow=True, fontsize=10)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(axis='both', which='major', width=1.5, length=5)
+
+    # Use integer ticks for shot sizes
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(Config.log_dir, 'baseline_comparison', 'shot_comparison', 'accuracy_vs_shots.png'),
+                dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # 2. F1 score plot
+    plt.figure(figsize=(12, 6), facecolor='white')
+    ax = plt.subplot(111)
+
+    for i, model_name in enumerate(model_names):
+        model_data = results['models'][model_name]
+        color = COLORS[i % len(COLORS)]
+        marker = markers[i % len(markers)]
+
+        ax.plot(
+            feasible_shots,
+            model_data['f1_scores'],
+            f'-{marker}',
+            linewidth=2.5,
+            markersize=8,
+            label=model_name,
+            color=color
+        )
+
+    # Styling
+    ax.set_title('Model F1 Score vs Number of Shots', fontsize=14, fontweight='bold', pad=10)
+    ax.set_xlabel('Number of Shots (K)', fontsize=12, fontweight='bold')
+    ax.set_ylabel('F1 Score (%)', fontsize=12, fontweight='bold')
+    ax.grid(True, linestyle='--', alpha=0.7)
+    ax.legend(frameon=True, fancybox=True, shadow=True, fontsize=10)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(axis='both', which='major', width=1.5, length=5)
+
+    # Use integer ticks for shot sizes
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(Config.log_dir, 'baseline_comparison', 'shot_comparison', 'f1_vs_shots.png'),
+                dpi=300, bbox_inches='tight')
+    plt.close()
+
+    return results
 
 def ablation_study_dynamic_graph(model, test_task_generator, device):
     """Dynamic vs static graph ablation experiment"""
@@ -915,221 +1237,466 @@ def noise_robustness_experiment(model, test_task_generator, device, noise_levels
     return noise_levels, results, ci_results, f1_results
 
 
-def compare_with_baselines(test_dataset, device, shot=5, baseline_models=None):
-    """Compare HRRPGraphNet++ with baseline methods"""
-    # Create results directory
-    results_dir = os.path.join(Config.log_dir, 'baseline_comparison')
-    os.makedirs(results_dir, exist_ok=True)
+def compare_with_baselines(dataset, device, shot=5, baseline_models=None, num_tasks=100):
+    """
+    Compare HRRPGraphNet with baseline methods
 
-    # Set shot value for all experiments
-    test_task_generator = TaskGenerator(test_dataset, n_way=Config.test_n_way, k_shot=shot, q_query=Config.q_query)
+    Args:
+        dataset: Test dataset
+        device: Device to run models on
+        shot: K-shot setting
+        baseline_models: List of baseline models to compare
+        num_tasks: Number of tasks to evaluate
 
-    # Define models to compare
-    num_classes = Config.test_n_way
-    available_models = {
-        'HRRPGraphNet++': MDGN(num_classes=num_classes).to(device),
-        'Static Graph': StaticGraphModel(num_classes=num_classes).to(device),
-        'Dynamic Graph': DynamicGraphModel(num_classes=num_classes).to(device),
-        'CNN': CNNModel(num_classes=num_classes).to(device),
-        'LSTM': LSTMModel(num_classes=num_classes).to(device),
-        'GCN': GCNModel(num_classes=num_classes).to(device),
-        'GAT': GATModel(num_classes=num_classes).to(device)
+    Returns:
+        DataFrame with comparison results
+    """
+    from models import (CNNModel, LSTMModel, GCNModel, GATModel,
+                        ProtoNetModel, MatchingNetModel, MDGN,
+                        PCASVM, TemplateMatcher)
+    from utils import compute_metrics, prepare_static_adjacency, create_comparison_table
+    from torch.optim import Adam
+    import torch.nn as nn
+    import pandas as pd
+    import numpy as np
+
+    # Set up model constructors
+    model_constructors = {
+        'CNN': CNNModel,
+        'LSTM': LSTMModel,
+        'GCN': GCNModel,
+        'GAT': GATModel,
+        'ProtoNet': ProtoNetModel,
+        'MatchingNet': MatchingNetModel,
+        'PCA+SVM': PCASVM,
+        'Template': TemplateMatcher,
+        'HRRPGraphNet': MDGN
     }
 
-    # Filter models based on baseline_models parameter
-    if baseline_models is not None:
-        models = {name: model for name, model in available_models.items() if name in baseline_models}
-        models['HRRPGraphNet++'] = available_models['HRRPGraphNet++']  # Always include our model
-    else:
-        models = available_models
+    # Determine which models to compare based on provided list or config
+    if baseline_models is None:
+        # Use default baselines from config
+        traditional_models = Config.traditional_baselines['methods'] if Config.traditional_baselines['enabled'] else []
+        dl_models = Config.dl_baselines['methods'] if Config.dl_baselines['enabled'] else []
+        fsl_models = Config.fsl_baselines['methods'] if Config.fsl_baselines['enabled'] else []
 
-    # Non-neural models (handle separately)
-    non_neural_models = []
-    if baseline_models is None or 'PCA+SVM' in baseline_models:
-        non_neural_models.append('PCA+SVM')
-    if baseline_models is None or 'Template Matching' in baseline_models:
-        non_neural_models.append('Template Matching')
+        baseline_models = traditional_models + dl_models + fsl_models
+
+    # Make sure HRRPGraphNet is included for comparison
+    if 'HRRPGraphNet' not in baseline_models:
+        baseline_models = ['HRRPGraphNet'] + baseline_models
+
+    print(f"Comparing against baseline models: {baseline_models}")
+
+    # Set up task generator
+    from dataset import TaskGenerator
+    n_way = Config.n_way
+    k_shot = shot
+    q_query = 15  # Fixed query size
+    task_generator = TaskGenerator(dataset, n_way=n_way, k_shot=k_shot, q_query=q_query)
 
     # Results storage
-    results = []
-    ci_results = []
-    f1_results = []
-    model_names = []
-    results_data = []
+    results = {}
 
-    # Test each model
-    for model_name, model in models.items():
-        print(f"\nTesting {model_name}:")
+    # Traditional ML baselines evaluation
+    traditional_models = ['PCA+SVM', 'Template']
+    for model_name in [m for m in baseline_models if m in traditional_models]:
+        print(f"\nEvaluating {model_name}...")
 
-        # Load best weights if available (for HRRPGraphNet++)
-        if model_name == 'HRRPGraphNet++':
-            best_model_path = os.path.join(Config.save_dir, 'best_model.pth')
-            if os.path.exists(best_model_path):
-                try:
-                    model.load_state_dict(torch.load(best_model_path))
-                    print(f"Loaded best model weights for {model_name}")
-                except Exception as e:
-                    print(f"Could not load weights: {e}")
+        all_accuracies = []
+        all_preds = []
+        all_labels = []
 
-        # Test model
-        accuracy, ci, _, f1 = test_model(model, test_task_generator, device, num_tasks=100)
+        for task_idx in range(num_tasks):
+            try:
+                # Generate task
+                support_x, support_y, query_x, query_y = task_generator.generate_task()
 
-        # Store results
-        model_names.append(model_name)
-        results.append(accuracy)
-        ci_results.append(ci)
-        f1_results.append(f1)
+                # Convert tensors to numpy arrays
+                support_x_np = support_x.numpy()
+                support_y_np = support_y.numpy()
+                query_x_np = query_x.numpy()
+                query_y_np = query_y.numpy()
 
-        print(f"{model_name}: Accuracy: {accuracy:.2f}% ± {ci:.2f}%, F1: {f1:.2f}%")
-        results_data.append({
-            'Model': model_name,
-            'Accuracy': accuracy,
-            'CI': ci,
-            'F1': f1
-        })
+                # Reshape data
+                support_x_np = support_x_np.reshape(support_x_np.shape[0], -1)  # Flatten
+                query_x_np = query_x_np.reshape(query_x_np.shape[0], -1)  # Flatten
 
-    # Test non-neural models
-    # Generate a fixed set of tasks for fair comparison
-    all_tasks = []
-    for _ in range(100):
+                # Initialize model
+                if model_name == 'PCA+SVM':
+                    model = PCASVM(n_components=min(30, support_x_np.shape[0] - 1))
+                else:  # Template matching
+                    model = TemplateMatcher(metric='correlation')
+
+                # Train on support set
+                model.fit(support_x_np, support_y_np)
+
+                # Predict
+                preds = model.predict(query_x_np)
+
+                # Calculate accuracy
+                acc = np.mean(preds == query_y_np)
+                all_accuracies.append(acc)
+
+                # Store predictions and labels for metrics
+                all_preds.extend(preds)
+                all_labels.extend(query_y_np)
+
+            except Exception as e:
+                print(f"Error in task {task_idx}: {e}")
+                continue
+
+        # Calculate metrics
+        if all_preds:
+            metrics = compute_metrics(all_labels, all_preds)
+            avg_acc = np.mean(all_accuracies) * 100
+            std_acc = np.std(all_accuracies) * 100
+            ci = 1.96 * std_acc / np.sqrt(len(all_accuracies))
+
+            results[model_name] = {
+                'accuracy': avg_acc,
+                'confidence_interval': ci,
+                'f1': metrics['f1'],
+                'precision': metrics['precision'],
+                'recall': metrics['recall']
+            }
+
+            print(f"{model_name} accuracy: {avg_acc:.2f}% ± {ci:.2f}%, F1: {metrics['f1']:.2f}%")
+
+    # Deep learning baselines evaluation
+    dl_models = ['CNN', 'LSTM', 'GCN', 'GAT']
+    for model_name in [m for m in baseline_models if m in dl_models]:
+        print(f"\nEvaluating {model_name}...")
+
+        all_accuracies = []
+        all_preds = []
+        all_labels = []
+
+        for task_idx in range(num_tasks):
+            try:
+                # Generate task
+                support_x, support_y, query_x, query_y = task_generator.generate_task()
+
+                # Move to device
+                support_x = support_x.to(device)
+                support_y = support_y.to(device)
+                query_x = query_x.to(device)
+                query_y = query_y.to(device)
+
+                # Initialize model
+                model = model_constructors[model_name](num_classes=n_way)
+                model = model.to(device)
+
+                # Train on support set
+                model.train()
+                optimizer = Adam(model.parameters(), lr=0.01)
+                criterion = nn.CrossEntropyLoss()
+
+                # Simple training loop
+                batch_size, channels, seq_len = support_x.shape
+                static_adj = prepare_static_adjacency(batch_size, seq_len, device)
+
+                # 50 epochs of fine-tuning
+                for _ in range(50):
+                    optimizer.zero_grad()
+                    logits, _ = model(support_x, static_adj)
+                    loss = criterion(logits, support_y)
+                    loss.backward()
+                    optimizer.step()
+
+                # Evaluate on query set
+                model.eval()
+                batch_size, channels, seq_len = query_x.shape
+                static_adj = prepare_static_adjacency(batch_size, seq_len, device)
+
+                with torch.no_grad():
+                    logits, _ = model(query_x, static_adj)
+                    preds = torch.argmax(logits, dim=1)
+
+                    # Calculate accuracy
+                    acc = (preds == query_y).float().mean().item()
+                    all_accuracies.append(acc)
+
+                    # Store predictions and labels for metrics
+                    all_preds.extend(preds.cpu().numpy())
+                    all_labels.extend(query_y.cpu().numpy())
+
+            except Exception as e:
+                print(f"Error in task {task_idx}: {e}")
+                continue
+
+        # Calculate metrics
+        if all_preds:
+            metrics = compute_metrics(all_labels, all_preds)
+            avg_acc = np.mean(all_accuracies) * 100
+            std_acc = np.std(all_accuracies) * 100
+            ci = 1.96 * std_acc / np.sqrt(len(all_accuracies))
+
+            results[model_name] = {
+                'accuracy': avg_acc,
+                'confidence_interval': ci,
+                'f1': metrics['f1'],
+                'precision': metrics['precision'],
+                'recall': metrics['recall']
+            }
+
+            print(f"{model_name} accuracy: {avg_acc:.2f}% ± {ci:.2f}%, F1: {metrics['f1']:.2f}%")
+
+    # Few-shot learning baselines evaluation
+    fsl_models = ['ProtoNet', 'MatchingNet']
+    for model_name in [m for m in baseline_models if m in fsl_models]:
+        print(f"\nEvaluating {model_name}...")
+
+        all_accuracies = []
+        all_preds = []
+        all_labels = []
+
+        # Initialize model
+        model = model_constructors[model_name]()
+        model = model.to(device)
+
+        # For FSL models, we don't need to train separately for each task
+        # Instead, train once on multiple support examples
+        if model_name in ['ProtoNet', 'MatchingNet']:
+            # Meta-training phase
+            model.train()
+            optimizer = Adam(model.parameters(), lr=0.001)
+
+            # Meta-train on a batch of tasks
+            meta_train_epochs = 100
+            meta_batch_size = 4
+
+            print(f"Meta-training {model_name} for {meta_train_epochs} epochs...")
+            for epoch in range(meta_train_epochs):
+                meta_train_loss = 0.0
+                meta_train_acc = 0.0
+
+                for _ in range(meta_batch_size):
+                    # Generate task
+                    support_x, support_y, query_x, query_y = task_generator.generate_task()
+
+                    # Move to device
+                    support_x = support_x.to(device)
+                    support_y = support_y.to(device)
+                    query_x = query_x.to(device)
+                    query_y = query_y.to(device)
+
+                    # Forward pass
+                    optimizer.zero_grad()
+
+                    if model_name == 'ProtoNet':
+                        # ProtoNet training
+                        # Extract features
+                        support_features = model(support_x)
+                        query_features = model(query_x)
+
+                        # Compute prototypes
+                        prototypes = model.compute_prototypes(support_features, support_y, n_way)
+
+                        # Compute distances
+                        dists = model.compute_distances(query_features, prototypes)
+
+                        # Compute loss (negative log probability)
+                        log_p_y = -dists
+                        loss = nn.CrossEntropyLoss()(log_p_y, query_y)
+
+                        # Get predictions
+                        _, preds = torch.min(dists, 1)
+
+                    elif model_name == 'MatchingNet':
+
+                        # MatchingNet training
+
+                        logits, _ = model(query_x, support_set=support_x, support_labels=support_y)
+
+                        # Compute loss
+
+                        loss = nn.CrossEntropyLoss()(logits, query_y)
+
+                        # Get predictions
+
+                        _, preds = torch.max(logits, 1)
+
+                    # Backward pass
+                    loss.backward()
+                    optimizer.step()
+
+                    # Compute accuracy
+                    acc = (preds == query_y).float().mean().item()
+
+                    meta_train_loss += loss.item()
+                    meta_train_acc += acc
+
+                # Log progress
+                if (epoch + 1) % 10 == 0:
+                    print(f"Epoch {epoch + 1}/{meta_train_epochs} - Loss: {meta_train_loss / meta_batch_size:.4f}, "
+                          f"Acc: {meta_train_acc / meta_batch_size * 100:.2f}%")
+
+        # Evaluate model on test tasks
+        model.eval()
+        for task_idx in range(num_tasks):
+            try:
+                # Generate task
+                support_x, support_y, query_x, query_y = task_generator.generate_task()
+
+                # Move to device
+                support_x = support_x.to(device)
+                support_y = support_y.to(device)
+                query_x = query_x.to(device)
+                query_y = query_y.to(device)
+
+                with torch.no_grad():
+                    if model_name == 'ProtoNet':
+                        # ProtoNet inference
+                        support_features = model(support_x)
+                        query_features = model(query_x)
+
+                        # Compute prototypes
+                        prototypes = model.compute_prototypes(support_features, support_y, n_way)
+
+                        # Compute distances
+                        dists = model.compute_distances(query_features, prototypes)
+
+                        # Get predictions
+                        _, preds = torch.min(dists, 1)
+
+                    # And later in the evaluation section:
+
+                    elif model_name == 'MatchingNet':
+
+                        # MatchingNet inference
+
+                        logits, _ = model(query_x, support_set=support_x, support_labels=support_y)
+
+                        # Get predictions
+
+                        _, preds = torch.max(logits, 1)
+
+                    # Calculate accuracy
+                    acc = (preds == query_y).float().mean().item()
+                    all_accuracies.append(acc)
+
+                    # Store predictions and labels for metrics
+                    all_preds.extend(preds.cpu().numpy())
+                    all_labels.extend(query_y.cpu().numpy())
+
+            except Exception as e:
+                print(f"Error in task {task_idx}: {e}")
+                continue
+
+        # Calculate metrics
+        if all_preds:
+            metrics = compute_metrics(all_labels, all_preds)
+            avg_acc = np.mean(all_accuracies) * 100
+            std_acc = np.std(all_accuracies) * 100
+            ci = 1.96 * std_acc / np.sqrt(len(all_accuracies))
+
+            results[model_name] = {
+                'accuracy': avg_acc,
+                'confidence_interval': ci,
+                'f1': metrics['f1'],
+                'precision': metrics['precision'],
+                'recall': metrics['recall']
+            }
+
+            print(f"{model_name} accuracy: {avg_acc:.2f}% ± {ci:.2f}%, F1: {metrics['f1']:.2f}%")
+
+    # HRRPGraphNet evaluation (MAML-style)
+    if 'HRRPGraphNet' in baseline_models:
+        print("\nEvaluating HRRPGraphNet...")
+
+        # Load the latest trained model if available
+        from utils import find_latest_experiment
+        model = MDGN(num_classes=n_way)
+        model = model.to(device)
+
+        # Try to load from checkpoint if available
         try:
-            task = test_task_generator.generate_task()
-            all_tasks.append(task)
+            latest_exp = find_latest_experiment()
+            if latest_exp:
+                model_path = f"checkpoints/experiment_{latest_exp}/best_model.pth"
+                if os.path.exists(model_path):
+                    model.load_state_dict(torch.load(model_path))
+                    print(f"Loaded HRRPGraphNet model from {model_path}")
         except Exception as e:
-            print(f"Error generating task: {e}")
-            continue
+            print(f"Error loading saved model: {e}")
+            print("Using a freshly initialized HRRPGraphNet model instead.")
 
-    # PCA+SVM
-    if 'PCA+SVM' in non_neural_models:
-        print("\nTesting PCA+SVM:")
-        pca_svm_accuracies = []
-        pca_svm_f1s = []
+        # Evaluate MAML-style
+        from train import MAMLPlusPlusTrainer
 
-        for task_idx, (support_x, support_y, query_x, query_y) in enumerate(all_tasks):
+        all_accuracies = []
+        all_preds = []
+        all_labels = []
+
+        for task_idx in range(num_tasks):
             try:
-                # Convert to numpy
-                support_x_np = support_x.reshape(support_x.shape[0], -1).detach().numpy()
-                support_y_np = support_y.detach().numpy()
-                query_x_np = query_x.reshape(query_x.shape[0], -1).detach().numpy()
-                query_y_np = query_y.detach().numpy()
+                # Generate task
+                support_x, support_y, query_x, query_y = task_generator.generate_task()
 
-                # Train PCA+SVM
-                pca_svm = PCASVM()
-                pca_svm.fit(support_x_np, support_y_np)
+                # Move to device
+                support_x = support_x.to(device)
+                support_y = support_y.to(device)
+                query_x = query_x.to(device)
+                query_y = query_y.to(device)
 
-                # Test
-                preds = pca_svm.predict(query_x_np)
-                accuracy = accuracy_score(query_y_np, preds)
-                f1 = f1_score(query_y_np, preds, average='macro')
+                # Fine-tune model on support set (MAML inner loop)
+                temp_trainer = MAMLPlusPlusTrainer(model, device)
+                adapted_model, _, _, _ = temp_trainer.inner_loop(support_x, support_y)
 
-                pca_svm_accuracies.append(accuracy)
-                pca_svm_f1s.append(f1)
+                # Test on query set
+                batch_size, channels, seq_len = query_x.shape
+                static_adj = prepare_static_adjacency(batch_size, seq_len, device)
+
+                with torch.no_grad():
+                    logits, _ = adapted_model(query_x, static_adj)
+                    preds = torch.argmax(logits, dim=1)
+
+                    # Calculate accuracy
+                    acc = (preds == query_y).float().mean().item()
+                    all_accuracies.append(acc)
+
+                    # Store predictions and labels for metrics
+                    all_preds.extend(preds.cpu().numpy())
+                    all_labels.extend(query_y.cpu().numpy())
 
             except Exception as e:
-                print(f"Error in PCA+SVM task {task_idx}: {e}")
+                print(f"Error in task {task_idx}: {e}")
                 continue
 
-        if pca_svm_accuracies:
-            pca_svm_acc = np.mean(pca_svm_accuracies) * 100
-            pca_svm_ci = 1.96 * np.std(pca_svm_accuracies) * 100 / np.sqrt(len(pca_svm_accuracies))
-            pca_svm_f1 = np.mean(pca_svm_f1s) * 100
+        # Calculate metrics
+        if all_preds:
+            metrics = compute_metrics(all_labels, all_preds)
+            avg_acc = np.mean(all_accuracies) * 100
+            std_acc = np.std(all_accuracies) * 100
+            ci = 1.96 * std_acc / np.sqrt(len(all_accuracies))
 
-            model_names.append('PCA+SVM')
-            results.append(pca_svm_acc)
-            ci_results.append(pca_svm_ci)
-            f1_results.append(pca_svm_f1)
+            results['HRRPGraphNet'] = {
+                'accuracy': avg_acc,
+                'confidence_interval': ci,
+                'f1': metrics['f1'],
+                'precision': metrics['precision'],
+                'recall': metrics['recall']
+            }
 
-            print(f"PCA+SVM: Accuracy: {pca_svm_acc:.2f}% ± {pca_svm_ci:.2f}%, F1: {pca_svm_f1:.2f}%")
-            results_data.append({
-                'Model': 'PCA+SVM',
-                'Accuracy': pca_svm_acc,
-                'CI': pca_svm_ci,
-                'F1': pca_svm_f1
-            })
+            print(f"HRRPGraphNet accuracy: {avg_acc:.2f}% ± {ci:.2f}%, F1: {metrics['f1']:.2f}%")
 
-    # Template Matching
-    if 'Template Matching' in non_neural_models:
-        print("\nTesting Template Matching:")
-        tm_accuracies = []
-        tm_f1s = []
+    # Create comparison table
+    comparison_df = pd.DataFrame([
+        {
+            'model': model_name,
+            'accuracy': f"{results[model_name]['accuracy']:.2f}% ± {results[model_name]['confidence_interval']:.2f}%",
+            'f1_score': f"{results[model_name]['f1']:.2f}%",
+            'precision': f"{results[model_name]['precision']:.2f}%",
+            'recall': f"{results[model_name]['recall']:.2f}%"
+        }
+        for model_name in results.keys()
+    ])
 
-        for task_idx, (support_x, support_y, query_x, query_y) in enumerate(all_tasks):
-            try:
-                # Convert to numpy
-                support_x_np = support_x.reshape(support_x.shape[0], -1).detach().numpy()
-                support_y_np = support_y.detach().numpy()
-                query_x_np = query_x.reshape(query_x.shape[0], -1).detach().numpy()
-                query_y_np = query_y.detach().numpy()
+    print("\nBaseline Comparison Results:")
+    print(comparison_df.to_string(index=False))
 
-                # Train Template Matcher
-                tm = TemplateMatcher(metric='correlation')
-                tm.fit(support_x_np, support_y_np)
-
-                # Test
-                preds = tm.predict(query_x_np)
-                accuracy = accuracy_score(query_y_np, preds)
-                f1 = f1_score(query_y_np, preds, average='macro')
-
-                tm_accuracies.append(accuracy)
-                tm_f1s.append(f1)
-
-            except Exception as e:
-                print(f"Error in Template Matching task {task_idx}: {e}")
-                continue
-
-        if tm_accuracies:
-            tm_acc = np.mean(tm_accuracies) * 100
-            tm_ci = 1.96 * np.std(tm_accuracies) * 100 / np.sqrt(len(tm_accuracies))
-            tm_f1 = np.mean(tm_f1s) * 100
-
-            model_names.append('Template Matching')
-            results.append(tm_acc)
-            ci_results.append(tm_ci)
-            f1_results.append(tm_f1)
-
-            print(f"Template Matching: Accuracy: {tm_acc:.2f}% ± {tm_ci:.2f}%, F1: {tm_f1:.2f}%")
-            results_data.append({
-                'Model': 'Template Matching',
-                'Accuracy': tm_acc,
-                'CI': tm_ci,
-                'F1': tm_f1
-            })
-
-    # Save results to CSV
-    results_df = pd.DataFrame(results_data)
-    results_df.to_csv(os.path.join(results_dir, f'baseline_comparison_{shot}shot.csv'), index=False)
-
-    # Plot results
-    plt.figure(figsize=(12, 8))
-
-    # Sort results for better visualization
-    sorted_indices = np.argsort(results)[::-1]  # Descending order
-    sorted_names = [model_names[i] for i in sorted_indices]
-    sorted_results = [results[i] for i in sorted_indices]
-    sorted_ci = [ci_results[i] for i in sorted_indices]
-    sorted_f1 = [f1_results[i] for i in sorted_indices]
-
-    x_pos = np.arange(len(sorted_names))
-
-    # Plot accuracy bars
-    plt.bar(x_pos - 0.2, sorted_results, width=0.4, yerr=sorted_ci, capsize=5, label='Accuracy', color='blue',
-            alpha=0.7)
-
-    # Plot F1 bars
-    plt.bar(x_pos + 0.2, sorted_f1, width=0.4, label='F1 Score', color='green', alpha=0.7)
-
-    plt.xticks(x_pos, sorted_names, rotation=45, ha='right')
-    plt.title(f'Model Comparison ({shot}-shot)')
-    plt.ylabel('Performance (%)')
-    plt.ylim(0, 100)
-    plt.grid(axis='y')
-    plt.legend()
-    plt.tight_layout()
-
-    plt.savefig(os.path.join(results_dir, f'baseline_comparison_{shot}shot.png'), dpi=300, bbox_inches='tight')
-    plt.close()
-
-    return results_df
+    return comparison_df
 
 
 def visualize_model_interpretability(model, test_task_generator, device):

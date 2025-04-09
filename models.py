@@ -7,6 +7,139 @@ from sklearn.decomposition import PCA
 from sklearn.svm import SVC
 import numpy as np
 
+class ProtoNetModel(nn.Module):
+    """Prototypical Network for few-shot HRRP recognition"""
+
+    def __init__(self, feature_size=None):
+        super(ProtoNetModel, self).__init__()
+        feature_size = feature_size or Config.feature_size
+
+        # Embedding network
+        self.encoder = nn.Sequential(
+            nn.Conv1d(1, 32, kernel_size=5, padding=2),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+
+            nn.Conv1d(32, 64, kernel_size=5, padding=2),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+
+            nn.Conv1d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+
+            nn.Conv1d(128, 128, kernel_size=3, padding=1),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1)
+        )
+
+    def forward(self, x, return_features=True):
+        # Extract features: [batch, 128]
+        features = self.encoder(x).squeeze(-1)
+        return features
+
+    def compute_prototypes(self, support_features, support_labels, n_way):
+        """Compute class prototypes from support features"""
+        prototypes = []
+
+        for i in range(n_way):
+            # Select features for each class
+            class_features = support_features[support_labels == i]
+            # Compute mean to get prototype
+            prototype = class_features.mean(dim=0)
+            prototypes.append(prototype)
+
+        return torch.stack(prototypes)
+
+    def compute_distances(self, query_features, prototypes):
+        """Compute distance from queries to prototypes"""
+        n_queries = query_features.size(0)
+        n_prototypes = prototypes.size(0)
+
+        # Reshape to compute distances
+        query_features = query_features.unsqueeze(1).expand(n_queries, n_prototypes, -1)
+        prototypes = prototypes.unsqueeze(0).expand(n_queries, n_prototypes, -1)
+
+        # Compute euclidean distance
+        return torch.sum((query_features - prototypes) ** 2, dim=2)
+
+
+class MatchingNetModel(nn.Module):
+    """Matching Network for few-shot HRRP recognition"""
+
+    def __init__(self, num_classes=3, feature_size=None):
+        super(MatchingNetModel, self).__init__()
+        feature_size = feature_size or Config.feature_size
+        self.num_classes = num_classes
+
+        # Embedding network
+        self.encoder = nn.Sequential(
+            nn.Conv1d(1, 32, kernel_size=5, padding=2),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+
+            nn.Conv1d(32, 64, kernel_size=5, padding=2),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+
+            nn.Conv1d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+
+            nn.Conv1d(128, 128, kernel_size=3, padding=1),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1)
+        )
+
+    def forward(self, x, static_adj=None, support_set=None, support_labels=None):
+        """Forward pass with support set for matching
+
+        Args:
+            x: Query inputs [batch_size, channels, seq_len]
+            static_adj: Not used but included for API compatibility
+            support_set: Support set inputs or None
+            support_labels: Support set labels or None
+
+        Returns:
+            tuple: (logits, _) - For compatibility with other models
+        """
+        # Extract features: [batch, 128]
+        query_features = self.encoder(x).squeeze(-1)
+
+        # If no support set, return dummy logits (for compatibility)
+        if support_set is None or support_labels is None:
+            dummy_logits = torch.zeros(query_features.size(0), self.num_classes, device=x.device)
+            return dummy_logits, None
+
+        # Process support set
+        support_features = self.encoder(support_set).squeeze(-1)
+
+        # Compute attention through cosine similarity
+        cosine_similarities = self._compute_cosine_similarity(query_features, support_features)
+        attention = F.softmax(cosine_similarities, dim=1)
+
+        # Weighted sum of support labels to get classification logits
+        unique_labels = torch.unique(support_labels)
+        n_classes = len(unique_labels)
+        y_one_hot = F.one_hot(support_labels, n_classes).float()
+        logits = torch.matmul(attention, y_one_hot)
+
+        return logits, None  # Return tuple with None for compatibility
+
+    def _compute_cosine_similarity(self, query_features, support_features):
+        """Compute cosine similarity between query and support features"""
+        query_norm = F.normalize(query_features, p=2, dim=1)
+        support_norm = F.normalize(support_features, p=2, dim=1)
+
+        return torch.matmul(query_norm, support_norm.transpose(0, 1))
 
 class GraphAttention(nn.Module):
     """Multi-head graph attention layer"""
@@ -661,70 +794,6 @@ class ProtoNetModel(nn.Module):
         # Compute euclidean distance
         return torch.sum((query_features - prototypes) ** 2, dim=2)
 
-
-class MatchingNetModel(nn.Module):
-    """Matching Network for few-shot HRRP recognition"""
-
-    def __init__(self, feature_size=None):
-        super(MatchingNetModel, self).__init__()
-        feature_size = feature_size or Config.feature_size
-
-        # Embedding network (same as ProtoNet for simplicity)
-        self.encoder = nn.Sequential(
-            nn.Conv1d(1, 32, kernel_size=5, padding=2),
-            nn.BatchNorm1d(32),
-            nn.ReLU(),
-            nn.MaxPool1d(2),
-
-            nn.Conv1d(32, 64, kernel_size=5, padding=2),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-            nn.MaxPool1d(2),
-
-            nn.Conv1d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-            nn.MaxPool1d(2),
-
-            nn.Conv1d(128, 128, kernel_size=3, padding=1),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool1d(1)
-        )
-
-        # Full context embedding for support
-        self.lstm = nn.LSTM(128, 128, batch_first=True, bidirectional=True)
-
-    def forward(self, x, support_set=None, support_labels=None, return_features=True):
-        # Extract features: [batch, 128]
-        features = self.encoder(x).squeeze(-1)
-
-        if support_set is None or return_features:
-            return features
-
-        # Process support set
-        support_features = self.encoder(support_set).squeeze(-1)
-
-        # Compute attention
-        cosine_similarities = self._compute_cosine_similarity(features, support_features)
-        attention = F.softmax(cosine_similarities, dim=1)
-
-        # Weighted sum of support labels
-        n_classes = len(torch.unique(support_labels))
-        y_one_hot = F.one_hot(support_labels, n_classes).float()
-        logits = torch.matmul(attention, y_one_hot)
-
-        return logits, features
-
-    def _compute_cosine_similarity(self, query_features, support_features):
-        """Compute cosine similarity between query and support features"""
-        query_norm = F.normalize(query_features, p=2, dim=1)
-        support_norm = F.normalize(support_features, p=2, dim=1)
-
-        return torch.matmul(query_norm, support_norm.transpose(0, 1))
-
-
-# models.py 中的 PCASVM 类，大约在第 724 行开始
 class PCASVM:
     """PCA + SVM baseline for HRRP recognition"""
 
