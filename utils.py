@@ -946,7 +946,7 @@ def fig_to_image(fig):
     return img
 
 
-def create_model_summary(model, input_shape=(1, 1, 500), save_path=None):
+def create_model_summary(model, input_shape=(1, 1, Config.feature_size), save_path=None):
     """Create a summary of the model architecture"""
     # Calculate total parameters
     total_params = sum(p.numel() for p in model.parameters())

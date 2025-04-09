@@ -10,13 +10,28 @@ class Config:
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # 数据集配置
-    # data_root = 'datasets/simulated'
-    data_root = 'datasets/measured'
+    data_root = 'datasets/simulated'
+    all_classes = ["F15", "IDF", "F18"]
+    feature_size = 1000
+    cross_validation_schemes = [
+        {
+            'base_classes': ['EA-18G', 'EP-3E', 'F2'],
+            'novel_classes': ['F22', 'F35', 'IDF']
+        }
+    ]
+
+    # data_root = 'datasets/measured'
+    # all_classes = ['an26', 'citation', 'yar42']
+    # feature_size = 500
+    # cross_validation_schemes = [
+    #     {
+    #         'base_classes': ['an26', 'citation', 'yar42'],
+    #         'novel_classes': ['an26', 'citation', 'yar42']
+    #     }
+    # ]
+
     train_dir = os.path.join(data_root, 'train')
     test_dir = os.path.join(data_root, 'test')
-    # all_classes = ["F15", "IDF", "F18"]
-    all_classes = ['an26', 'citation', 'yar42']
-    feature_size = 500  # HRRP特征维度
 
     # 小样本学习配置
     n_way = 3  # N-way分类
@@ -25,12 +40,7 @@ class Config:
     num_tasks = 100  # 600
 
     # 交叉验证方案
-    cross_validation_schemes = [
-        {
-            'base_classes': ['an26', 'citation', 'yar42'],
-            'novel_classes': ['an26', 'citation', 'yar42']
-        }
-    ]
+
     current_scheme = 0  # 当前使用的方案索引
 
     # 模型配置

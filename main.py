@@ -61,7 +61,7 @@ def parse_args():
                         help='Operation mode: train, test, ablation, baseline, robustness, visualization, complexity')
 
     # Dataset configuration
-    parser.add_argument('--dataset', type=str, default='measured', choices=['simulated', 'measured'],
+    parser.add_argument('--dataset', type=str, default='simulated', choices=['simulated', 'measured'],
                         help='Dataset type: simulated or measured')
     parser.add_argument('--cv', type=int, default=0,
                         help='Cross-validation scheme index')

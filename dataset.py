@@ -122,12 +122,12 @@ class HRRPDataset(Dataset):
             magnitude = np.abs(hrrp_data).flatten()
 
             # 确保长度为500
-            if len(magnitude) < 500:
-                padded = np.zeros(500)
+            if len(magnitude) < Config.feature_size:
+                padded = np.zeros(Config.feature_size)
                 padded[:len(magnitude)] = magnitude
                 magnitude = padded
-            elif len(magnitude) > 500:
-                magnitude = magnitude[:500]
+            elif len(magnitude) > Config.feature_size:
+                magnitude = magnitude[:Config.feature_size]
 
             # 转换为张量并添加通道维度
             data = torch.tensor(magnitude, dtype=torch.float32).unsqueeze(0)
@@ -140,7 +140,7 @@ class HRRPDataset(Dataset):
         except Exception as e:
             print(f"加载文件时出错 {file_path}: {str(e)}")
             # 返回随机规范化数据
-            return torch.randn(1, 500), torch.tensor(label, dtype=torch.long)
+            return torch.randn(1, Config.feature_size), torch.tensor(label, dtype=torch.long)
 
     def _load_mat_file(self, file_path):
         """加载MATLAB .mat文件"""
