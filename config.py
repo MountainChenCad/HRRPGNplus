@@ -182,7 +182,7 @@ class Config:
     # 少样本学习方法
     fsl_baselines = {
         'enabled': True,
-        'methods': ['ProtoNet', 'MatchingNet']
+        'methods': ['MAML', 'MAML++', 'ANIL', 'Meta-SGD']
     }
 
     # ========== 可视化与解释性分析配置 ==========

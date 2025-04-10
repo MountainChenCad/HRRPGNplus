@@ -16,7 +16,7 @@ from dataset import (
 )
 from models import (
     MDGN, CNNModel, LSTMModel, GCNModel, GATModel,
-    ProtoNetModel, MatchingNetModel, PCASVM, TemplateMatcher,
+    MAMLModel, MAMLPlusPlusModel, MetaSGDModel, ANILModel, PCASVM, TemplateMatcher,
     StaticGraphModel, DynamicGraphModel, HybridGraphModel
 )
 from train import (

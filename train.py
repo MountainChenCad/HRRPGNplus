@@ -17,7 +17,7 @@ from config import Config
 from dataset import TaskGenerator
 from models import (
     MDGN, CNNModel, LSTMModel, GCNModel, GATModel,
-    ProtoNetModel, MatchingNetModel, PCASVM, TemplateMatcher,
+    MAMLModel, MAMLPlusPlusModel, MetaSGDModel, ANILModel, PCASVM, TemplateMatcher,
     StaticGraphModel, DynamicGraphModel, HybridGraphModel
 )
 from utils import (
@@ -1202,8 +1202,7 @@ def compare_with_baselines(dataset, device, shot=5, baseline_models=None, num_ta
     Returns:
         DataFrame with comparison results
     """
-    from models import (CNNModel, LSTMModel, GCNModel, GATModel,
-                        ProtoNetModel, MatchingNetModel, MDGN,
+    from models import (CNNModel, LSTMModel, GCNModel, GATModel, MDGN,
                         PCASVM, TemplateMatcher)
     from utils import compute_metrics, prepare_static_adjacency, create_comparison_table
     from torch.optim import Adam
@@ -1211,17 +1210,19 @@ def compare_with_baselines(dataset, device, shot=5, baseline_models=None, num_ta
     import pandas as pd
     import numpy as np
 
-    # Set up model constructors
+    # 设置模型构造器
     model_constructors = {
         'CNN': CNNModel,
         'LSTM': LSTMModel,
         'GCN': GCNModel,
         'GAT': GATModel,
-        'ProtoNet': ProtoNetModel,
-        'MatchingNet': MatchingNetModel,
         'PCA+SVM': PCASVM,
         'Template': TemplateMatcher,
-        'HRRPGraphNet': MDGN
+        'HRRPGraphNet': MDGN,
+        'MAML': MAMLModel,
+        'MAML++': MAMLPlusPlusModel,
+        'ANIL': ANILModel,
+        'Meta-SGD': MetaSGDModel
     }
 
     # Determine which models to compare based on provided list or config
@@ -1393,141 +1394,105 @@ def compare_with_baselines(dataset, device, shot=5, baseline_models=None, num_ta
 
             print(f"{model_name} accuracy: {avg_acc:.2f}% ± {ci:.2f}%, F1: {metrics['f1']:.2f}%")
 
-    # Few-shot learning baselines evaluation
-    fsl_models = ['ProtoNet', 'MatchingNet']
-    for model_name in [m for m in baseline_models if m in fsl_models]:
+    # 元学习方法评估
+    meta_learning_models = ['MAML', 'MAML++', 'ANIL', 'Meta-SGD']
+    for model_name in [m for m in baseline_models if m in meta_learning_models]:
         print(f"\nEvaluating {model_name}...")
+
+        # 初始化模型
+        model = model_constructors[model_name](num_classes=n_way)
+        model = model.to(device)
 
         all_accuracies = []
         all_preds = []
         all_labels = []
 
-        # Initialize model
-        model = model_constructors[model_name]()
-        model = model.to(device)
+        # 元训练阶段（除非使用预训练模型）
+        model.train()
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-        # For FSL models, we don't need to train separately for each task
-        # Instead, train once on multiple support examples
-        if model_name in ['ProtoNet', 'MatchingNet']:
-            # Meta-training phase
-            model.train()
-            optimizer = Adam(model.parameters(), lr=0.001)
+        # 简化版元训练，仅为了基线比较
+        print(f"Meta-training {model_name} for brief period...")
+        meta_train_epochs = 10  # 简化为10个epoch
+        meta_batch_size = 4
 
-            # Meta-train on a batch of tasks
-            meta_train_epochs = 100
-            meta_batch_size = 4
+        for epoch in range(meta_train_epochs):
+            meta_train_loss = 0.0
 
-            print(f"Meta-training {model_name} for {meta_train_epochs} epochs...")
-            for epoch in range(meta_train_epochs):
-                meta_train_loss = 0.0
-                meta_train_acc = 0.0
-
-                for _ in range(meta_batch_size):
-                    # Generate task
-                    support_x, support_y, query_x, query_y = task_generator.generate_task()
-
-                    # Move to device
-                    support_x = support_x.to(device)
-                    support_y = support_y.to(device)
-                    query_x = query_x.to(device)
-                    query_y = query_y.to(device)
-
-                    # Forward pass
-                    optimizer.zero_grad()
-
-                    if model_name == 'ProtoNet':
-                        # ProtoNet training
-                        # Extract features
-                        support_features = model(support_x)
-                        query_features = model(query_x)
-
-                        # Compute prototypes
-                        prototypes = model.compute_prototypes(support_features, support_y, n_way)
-
-                        # Compute distances
-                        dists = model.compute_distances(query_features, prototypes)
-
-                        # Compute loss (negative log probability)
-                        log_p_y = -dists
-                        loss = nn.CrossEntropyLoss()(log_p_y, query_y)
-
-                        # Get predictions
-                        _, preds = torch.min(dists, 1)
-
-                    elif model_name == 'MatchingNet':
-
-                        # MatchingNet training
-
-                        logits, _ = model(query_x, support_set=support_x, support_labels=support_y)
-
-                        # Compute loss
-
-                        loss = nn.CrossEntropyLoss()(logits, query_y)
-
-                        # Get predictions
-
-                        _, preds = torch.max(logits, 1)
-
-                    # Backward pass
-                    loss.backward()
-                    optimizer.step()
-
-                    # Compute accuracy
-                    acc = (preds == query_y).float().mean().item()
-
-                    meta_train_loss += loss.item()
-                    meta_train_acc += acc
-
-                # Log progress
-                if (epoch + 1) % 10 == 0:
-                    print(f"Epoch {epoch + 1}/{meta_train_epochs} - Loss: {meta_train_loss / meta_batch_size:.4f}, "
-                          f"Acc: {meta_train_acc / meta_batch_size * 100:.2f}%")
-
-        # Evaluate model on test tasks
-        model.eval()
-        for task_idx in range(num_tasks):
-            try:
-                # Generate task
+            for _ in range(meta_batch_size):
+                # 生成任务
                 support_x, support_y, query_x, query_y = task_generator.generate_task()
 
-                # Move to device
+                # 移动到设备
                 support_x = support_x.to(device)
                 support_y = support_y.to(device)
                 query_x = query_x.to(device)
                 query_y = query_y.to(device)
 
+                # MAML内循环更新
+                optimizer.zero_grad()
+
+                # 前向传播（支持集）
+                logits, _ = model(support_x)
+                inner_loss = nn.CrossEntropyLoss()(logits, support_y)
+
+                # 计算参数更新
+                updated_params = model.adapt_params(inner_loss)
+
+                # 创建临时更新的模型
+                clone = model.clone()
+                clone.set_params(updated_params)
+
+                # 使用更新后的模型在查询集上计算损失
+                query_logits, _ = clone(query_x)
+                outer_loss = nn.CrossEntropyLoss()(query_logits, query_y)
+
+                # 外循环更新
+                outer_loss.backward()
+                optimizer.step()
+
+                meta_train_loss += outer_loss.item()
+
+            if (epoch + 1) % 2 == 0:
+                print(f"Epoch {epoch + 1}/{meta_train_epochs} - Loss: {meta_train_loss / meta_batch_size:.4f}")
+
+        # 评估模型
+        print(f"Evaluating {model_name} on test tasks...")
+        model.eval()
+
+        for task_idx in range(num_tasks):
+            try:
+                # 生成任务
+                support_x, support_y, query_x, query_y = task_generator.generate_task()
+
+                # 移动到设备
+                support_x = support_x.to(device)
+                support_y = support_y.to(device)
+                query_x = query_x.to(device)
+                query_y = query_y.to(device)
+
+                # 内循环适应
+                # 前向传播（支持集）
+                logits, _ = model(support_x)
+                inner_loss = nn.CrossEntropyLoss()(logits, support_y)
+
+                # 计算参数更新
+                updated_params = model.adapt_params(inner_loss)
+
+                # 创建临时更新的模型
+                clone = model.clone()
+                clone.set_params(updated_params)
+
+                # 使用更新后的模型在查询集上测试
                 with torch.no_grad():
-                    if model_name == 'ProtoNet':
-                        # ProtoNet inference
-                        support_features = model(support_x)
-                        query_features = model(query_x)
+                    query_logits, _ = clone(query_x)
+                    preds = torch.argmax(query_logits, dim=1)
 
-                        # Compute prototypes
-                        prototypes = model.compute_prototypes(support_features, support_y, n_way)
-
-                        # Compute distances
-                        dists = model.compute_distances(query_features, prototypes)
-
-                        # Get predictions
-                        _, preds = torch.min(dists, 1)
-
-                    # And later in the evaluation section:
-
-                    elif model_name == 'MatchingNet':
-
-                        # MatchingNet inference
-
-                        logits, _ = model(query_x, support_set=support_x, support_labels=support_y)
-
-                        # Get predictions
-
-                        _, preds = torch.max(logits, 1)
-
-                    # Calculate accuracy
+                    # 计算准确率
                     acc = (preds == query_y).float().mean().item()
                     all_accuracies.append(acc)
 
-                    # Store predictions and labels for metrics
+                    # 存储预测结果和标签
                     all_preds.extend(preds.cpu().numpy())
                     all_labels.extend(query_y.cpu().numpy())
 
@@ -1535,7 +1500,7 @@ def compare_with_baselines(dataset, device, shot=5, baseline_models=None, num_ta
                 print(f"Error in task {task_idx}: {e}")
                 continue
 
-        # Calculate metrics
+        # 计算指标
         if all_preds:
             metrics = compute_metrics(all_labels, all_preds)
             avg_acc = np.mean(all_accuracies) * 100

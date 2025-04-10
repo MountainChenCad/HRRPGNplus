@@ -7,139 +7,262 @@ from sklearn.decomposition import PCA
 from sklearn.svm import SVC
 import numpy as np
 
-class ProtoNetModel(nn.Module):
-    """Prototypical Network for few-shot HRRP recognition"""
 
-    def __init__(self, feature_size=None):
-        super(ProtoNetModel, self).__init__()
-        feature_size = feature_size or Config.feature_size
+class Conv64F(nn.Module):
+    """Standard Conv64F backbone for few-shot learning"""
 
-        # Embedding network
+    def __init__(self, in_channels=1):
+        super(Conv64F, self).__init__()
+
         self.encoder = nn.Sequential(
-            nn.Conv1d(1, 32, kernel_size=5, padding=2),
-            nn.BatchNorm1d(32),
-            nn.ReLU(),
-            nn.MaxPool1d(2),
-
-            nn.Conv1d(32, 64, kernel_size=5, padding=2),
+            # Block 1
+            nn.Conv1d(in_channels, 64, kernel_size=3, padding=1),
             nn.BatchNorm1d(64),
             nn.ReLU(),
             nn.MaxPool1d(2),
 
-            nn.Conv1d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-            nn.MaxPool1d(2),
-
-            nn.Conv1d(128, 128, kernel_size=3, padding=1),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool1d(1)
-        )
-
-    def forward(self, x, return_features=True):
-        # Extract features: [batch, 128]
-        features = self.encoder(x).squeeze(-1)
-        return features
-
-    def compute_prototypes(self, support_features, support_labels, n_way):
-        """Compute class prototypes from support features"""
-        prototypes = []
-
-        for i in range(n_way):
-            # Select features for each class
-            class_features = support_features[support_labels == i]
-            # Compute mean to get prototype
-            prototype = class_features.mean(dim=0)
-            prototypes.append(prototype)
-
-        return torch.stack(prototypes)
-
-    def compute_distances(self, query_features, prototypes):
-        """Compute distance from queries to prototypes"""
-        n_queries = query_features.size(0)
-        n_prototypes = prototypes.size(0)
-
-        # Reshape to compute distances
-        query_features = query_features.unsqueeze(1).expand(n_queries, n_prototypes, -1)
-        prototypes = prototypes.unsqueeze(0).expand(n_queries, n_prototypes, -1)
-
-        # Compute euclidean distance
-        return torch.sum((query_features - prototypes) ** 2, dim=2)
-
-
-class MatchingNetModel(nn.Module):
-    """Matching Network for few-shot HRRP recognition"""
-
-    def __init__(self, num_classes=3, feature_size=None):
-        super(MatchingNetModel, self).__init__()
-        feature_size = feature_size or Config.feature_size
-        self.num_classes = num_classes
-
-        # Embedding network
-        self.encoder = nn.Sequential(
-            nn.Conv1d(1, 32, kernel_size=5, padding=2),
-            nn.BatchNorm1d(32),
-            nn.ReLU(),
-            nn.MaxPool1d(2),
-
-            nn.Conv1d(32, 64, kernel_size=5, padding=2),
+            # Block 2
+            nn.Conv1d(64, 64, kernel_size=3, padding=1),
             nn.BatchNorm1d(64),
             nn.ReLU(),
             nn.MaxPool1d(2),
 
-            nn.Conv1d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm1d(128),
+            # Block 3
+            nn.Conv1d(64, 64, kernel_size=3, padding=1),
+            nn.BatchNorm1d(64),
             nn.ReLU(),
             nn.MaxPool1d(2),
 
-            nn.Conv1d(128, 128, kernel_size=3, padding=1),
-            nn.BatchNorm1d(128),
+            # Block 4
+            nn.Conv1d(64, 64, kernel_size=3, padding=1),
+            nn.BatchNorm1d(64),
             nn.ReLU(),
             nn.AdaptiveAvgPool1d(1)
         )
 
-    def forward(self, x, static_adj=None, support_set=None, support_labels=None):
-        """Forward pass with support set for matching
+        # Initialize parameters
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
 
-        Args:
-            x: Query inputs [batch_size, channels, seq_len]
-            static_adj: Not used but included for API compatibility
-            support_set: Support set inputs or None
-            support_labels: Support set labels or None
+    def forward(self, x):
+        return self.encoder(x).squeeze(-1)  # Remove spatial dimension
 
-        Returns:
-            tuple: (logits, _) - For compatibility with other models
-        """
-        # Extract features: [batch, 128]
-        query_features = self.encoder(x).squeeze(-1)
 
-        # If no support set, return dummy logits (for compatibility)
-        if support_set is None or support_labels is None:
-            dummy_logits = torch.zeros(query_features.size(0), self.num_classes, device=x.device)
-            return dummy_logits, None
+class MAMLModel(nn.Module):
+    """MAML (Model-Agnostic Meta-Learning) model with Conv64F backbone"""
 
-        # Process support set
-        support_features = self.encoder(support_set).squeeze(-1)
+    def __init__(self, num_classes=3):
+        super(MAMLModel, self).__init__()
+        self.feature_extractor = Conv64F(in_channels=1)
+        self.classifier = nn.Linear(64, num_classes)
 
-        # Compute attention through cosine similarity
-        cosine_similarities = self._compute_cosine_similarity(query_features, support_features)
-        attention = F.softmax(cosine_similarities, dim=1)
+        # Initialize classifier
+        nn.init.xavier_uniform_(self.classifier.weight)
+        nn.init.zeros_(self.classifier.bias)
 
-        # Weighted sum of support labels to get classification logits
-        unique_labels = torch.unique(support_labels)
-        n_classes = len(unique_labels)
-        y_one_hot = F.one_hot(support_labels, n_classes).float()
-        logits = torch.matmul(attention, y_one_hot)
+    def forward(self, x, static_adj=None, return_features=False):
+        features = self.feature_extractor(x)
+        logits = self.classifier(features)
 
-        return logits, None  # Return tuple with None for compatibility
+        if return_features:
+            return logits, features
+        return logits, None
 
-    def _compute_cosine_similarity(self, query_features, support_features):
-        """Compute cosine similarity between query and support features"""
-        query_norm = F.normalize(query_features, p=2, dim=1)
-        support_norm = F.normalize(support_features, p=2, dim=1)
+    def clone(self):
+        """Create a deep copy of the model for inner loop update"""
+        clone = MAMLModel(num_classes=self.classifier.out_features)
+        clone.load_state_dict(self.state_dict())
+        return clone
 
-        return torch.matmul(query_norm, support_norm.transpose(0, 1))
+    def adapt_params(self, loss, lr=0.01):
+        """Update parameters based on loss, return updated parameter dictionary"""
+        grads = torch.autograd.grad(loss, self.parameters(), create_graph=True)
+
+        updated_params = {}
+        for (name, param), grad in zip(self.named_parameters(), grads):
+            updated_params[name] = param - lr * grad
+
+        return updated_params
+
+    def set_params(self, params):
+        """Set parameters from parameter dictionary"""
+        for name, param in self.named_parameters():
+            if name in params:
+                param.data = params[name].data
+
+
+class MAMLPlusPlusModel(nn.Module):
+    """MAML++ (Improved MAML) model with Conv64F backbone"""
+
+    def __init__(self, num_classes=3):
+        super(MAMLPlusPlusModel, self).__init__()
+        self.feature_extractor = Conv64F(in_channels=1)
+        self.classifier = nn.Linear(64, num_classes)
+
+        # Initialize classifier
+        nn.init.xavier_uniform_(self.classifier.weight)
+        nn.init.zeros_(self.classifier.bias)
+
+        # MAML++ specific parameters
+        self.inner_lrs = nn.ParameterDict({
+            'feature_extractor': nn.Parameter(torch.ones(1) * 0.01),
+            'classifier': nn.Parameter(torch.ones(1) * 0.01)
+        })
+
+    def forward(self, x, static_adj=None, return_features=False):
+        features = self.feature_extractor(x)
+        logits = self.classifier(features)
+
+        if return_features:
+            return logits, features
+        return logits, None
+
+    def clone(self):
+        """Create a deep copy of the model for inner loop update"""
+        clone = MAMLPlusPlusModel(num_classes=self.classifier.out_features)
+        clone.load_state_dict(self.state_dict())
+        return clone
+
+    def adapt_params(self, loss, lr=None):
+        """Update parameters with per-layer adaptive learning rates"""
+        grads = torch.autograd.grad(loss, self.parameters(), create_graph=True)
+
+        updated_params = {}
+        idx = 0
+
+        # Update feature extractor parameters
+        for name, param in self.feature_extractor.named_parameters():
+            full_name = f'feature_extractor.{name}'
+            lr_value = self.inner_lrs['feature_extractor'].item()
+            updated_params[full_name] = param - lr_value * grads[idx]
+            idx += 1
+
+        # Update classifier parameters
+        for name, param in self.classifier.named_parameters():
+            full_name = f'classifier.{name}'
+            lr_value = self.inner_lrs['classifier'].item()
+            updated_params[full_name] = param - lr_value * grads[idx]
+            idx += 1
+
+        return updated_params
+
+    def set_params(self, params):
+        """Set parameters from parameter dictionary"""
+        for name, param in self.named_parameters():
+            if name in params:
+                param.data = params[name].data
+
+
+class ANILModel(nn.Module):
+    """ANIL (Almost No Inner Loop) model with Conv64F backbone"""
+
+    def __init__(self, num_classes=3):
+        super(ANILModel, self).__init__()
+        self.feature_extractor = Conv64F(in_channels=1)
+        self.classifier = nn.Linear(64, num_classes)
+
+        # Initialize classifier
+        nn.init.xavier_uniform_(self.classifier.weight)
+        nn.init.zeros_(self.classifier.bias)
+
+    def forward(self, x, static_adj=None, return_features=False):
+        features = self.feature_extractor(x)
+        logits = self.classifier(features)
+
+        if return_features:
+            return logits, features
+        return logits, None
+
+    def clone(self):
+        """Create a deep copy of the model for inner loop update"""
+        clone = ANILModel(num_classes=self.classifier.out_features)
+        clone.load_state_dict(self.state_dict())
+        return clone
+
+    def adapt_params(self, loss, lr=0.01):
+        """ANIL only updates classifier parameters"""
+        # Get only the classifier parameters
+        classifier_params = list(self.classifier.parameters())
+
+        # Compute gradients only for classifier parameters
+        grads = torch.autograd.grad(loss, classifier_params, create_graph=True)
+
+        updated_params = {}
+        # Copy all parameters first
+        for name, param in self.named_parameters():
+            updated_params[name] = param.clone()
+
+        # Update only classifier parameters
+        for i, (name, param) in enumerate(self.classifier.named_parameters()):
+            full_name = f'classifier.{name}'
+            updated_params[full_name] = param - lr * grads[i]
+
+        return updated_params
+
+    def set_params(self, params):
+        """Set parameters from parameter dictionary"""
+        for name, param in self.named_parameters():
+            if name in params:
+                param.data = params[name].data
+
+
+class MetaSGDModel(nn.Module):
+    """Meta-SGD model with Conv64F backbone"""
+
+    def __init__(self, num_classes=3):
+        super(MetaSGDModel, self).__init__()
+        self.feature_extractor = Conv64F(in_channels=1)
+        self.classifier = nn.Linear(64, num_classes)
+
+        # Initialize classifier
+        nn.init.xavier_uniform_(self.classifier.weight)
+        nn.init.zeros_(self.classifier.bias)
+
+        # Meta-SGD: Learnable per-parameter learning rates
+        self.lr_params = nn.ParameterDict()
+        for name, param in self.named_parameters():
+            self.lr_params[name.replace('.', '_')] = nn.Parameter(torch.ones_like(param) * 0.01)
+
+    def forward(self, x, static_adj=None, return_features=False):
+        features = self.feature_extractor(x)
+        logits = self.classifier(features)
+
+        if return_features:
+            return logits, features
+        return logits, None
+
+    def clone(self):
+        """Create a deep copy of the model for inner loop update"""
+        clone = MetaSGDModel(num_classes=self.classifier.out_features)
+        clone.load_state_dict(self.state_dict())
+        return clone
+
+    def adapt_params(self, loss, lr=None):
+        """Update parameters with learnable per-parameter learning rates"""
+        grads = torch.autograd.grad(loss, self.parameters(), create_graph=True)
+
+        updated_params = {}
+        for (name, param), grad in zip(self.named_parameters(), grads):
+            # Get corresponding learning rate parameter
+            lr_name = name.replace('.', '_')
+            param_lr = self.lr_params[lr_name]
+
+            # Update parameters with per-parameter learning rates
+            updated_params[name] = param - param_lr * grad
+
+        return updated_params
+
+    def set_params(self, params):
+        """Set parameters from parameter dictionary"""
+        for name, param in self.named_parameters():
+            if name in params:
+                param.data = params[name].data
 
 class GraphAttention(nn.Module):
     """Multi-head graph attention layer"""
@@ -732,67 +855,6 @@ class GATModel(nn.Module):
             attention_weights = getattr(self.pooling, 'last_attention_weights', None)
             return logits, features, adj2, attention_weights if extract_attention else None
         return logits, adj2
-
-
-class ProtoNetModel(nn.Module):
-    """Prototypical Network for few-shot HRRP recognition"""
-
-    def __init__(self, feature_size=None):
-        super(ProtoNetModel, self).__init__()
-        feature_size = feature_size or Config.feature_size
-
-        # Embedding network
-        self.encoder = nn.Sequential(
-            nn.Conv1d(1, 32, kernel_size=5, padding=2),
-            nn.BatchNorm1d(32),
-            nn.ReLU(),
-            nn.MaxPool1d(2),
-
-            nn.Conv1d(32, 64, kernel_size=5, padding=2),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-            nn.MaxPool1d(2),
-
-            nn.Conv1d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-            nn.MaxPool1d(2),
-
-            nn.Conv1d(128, 128, kernel_size=3, padding=1),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool1d(1)
-        )
-
-    def forward(self, x, return_features=True):
-        # Extract features: [batch, 128]
-        features = self.encoder(x).squeeze(-1)
-        return features
-
-    def compute_prototypes(self, support_features, support_labels, n_way):
-        """Compute class prototypes from support features"""
-        prototypes = []
-
-        for i in range(n_way):
-            # Select features for each class
-            class_features = support_features[support_labels == i]
-            # Compute mean to get prototype
-            prototype = class_features.mean(dim=0)
-            prototypes.append(prototype)
-
-        return torch.stack(prototypes)
-
-    def compute_distances(self, query_features, prototypes):
-        """Compute distance from queries to prototypes"""
-        n_queries = query_features.size(0)
-        n_prototypes = prototypes.size(0)
-
-        # Reshape to compute distances
-        query_features = query_features.unsqueeze(1).expand(n_queries, n_prototypes, -1)
-        prototypes = prototypes.unsqueeze(0).expand(n_queries, n_prototypes, -1)
-
-        # Compute euclidean distance
-        return torch.sum((query_features - prototypes) ** 2, dim=2)
 
 class PCASVM:
     """PCA + SVM baseline for HRRP recognition"""
