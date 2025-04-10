@@ -20,7 +20,7 @@ from models import (
     StaticGraphModel, DynamicGraphModel, HybridGraphModel
 )
 from train import (
-    MAMLPlusPlusTrainer as MAMLTrainer, test_model, shot_experiment,
+    MAMLPlusPlusTrainer as MAMLTrainer, test_model, run_shot_experiment,  # Update this line
     ablation_study_lambda, ablation_study_dynamic_graph, ablation_study_gnn_architecture,
     noise_robustness_experiment, compare_with_baselines, ablation_study_meta_learning,
     visualize_model_interpretability, computational_complexity_analysis, compare_models_across_shots
@@ -450,71 +450,49 @@ def test(args, model=None, vis=False):
             print(f"Feasible shot values: {feasible_shots}")
 
             # Initialize baseline models for comparison if requested
-            models_to_compare = {'HRRPGraphNet': model}
-
             if args.baseline_models:
-                print("\nInitializing baseline models for comparison...")
+                print("\nRunning comparison with baseline models...")
 
-                # Map of model names to classes
-                model_classes = {
-                    'CNN': CNNModel,
-                    'LSTM': LSTMModel,
-                    'GCN': GCNModel,
-                    'GAT': GATModel,
-                    'ProtoNet': ProtoNetModel,
-                    'MatchingNet': MatchingNetModel
+                # Create comparison directory
+                comparison_dir = os.path.join(results_dir, 'model_comparison')
+                os.makedirs(comparison_dir, exist_ok=True)
+
+                # Run model comparison across different shot values
+                comparison_results = compare_models_across_shots(
+                    test_dataset, Config.device,
+                    baseline_models=args.baseline_models,
+                    shot_sizes=feasible_shots
+                )
+
+                # Save comparison results
+                with open(os.path.join(comparison_dir, 'model_comparison_results.json'), 'w') as f:
+                    json.dump(comparison_results, f, indent=4)
+
+                print(f"Model comparison results saved to {comparison_dir}")
+            else:
+                # Run standard shot experiment for just the main model
+                shot_sizes, shot_results, shot_ci, shot_f1 = run_shot_experiment(  # Use the new function
+                    model, test_task_generator, Config.device,
+                    shot_sizes=feasible_shots
+                )
+
+                # Plot shot curve with error bars
+                plot_shot_curve(
+                    shot_sizes, shot_results, ci=shot_ci, f1_scores=shot_f1,
+                    title="Performance vs Number of Shots",
+                    save_path=os.path.join(results_dir, 'shot_curve.png')
+                )
+
+                # Save shot experiment results
+                shot_exp_results = {
+                    'shot_sizes': shot_sizes,
+                    'accuracies': shot_results,
+                    'confidence_intervals': shot_ci,
+                    'f1_scores': shot_f1
                 }
 
-                # Initialize requested baseline models
-                for model_name in args.baseline_models:
-                    if model_name in model_classes:
-                        try:
-                            print(f"Initializing {model_name} model...")
-                            models_to_compare[model_name] = model_classes[model_name](num_classes=Config.test_n_way)
-                            models_to_compare[model_name] = models_to_compare[model_name].to(Config.device)
-                        except Exception as e:
-                            print(f"Error initializing {model_name} model: {e}")
-
-            # Run shot experiment for all models
-            shot_results = shot_experiment(models_to_compare, test_task_generator, Config.device,
-                                           shot_sizes=feasible_shots)
-
-            # Extract data for plotting
-            shot_sizes = shot_results['shot_sizes']
-            model_names = list(shot_results['models'].keys())
-            accuracies = [shot_results['models'][name]['accuracies'] for name in model_names]
-            cis = [shot_results['models'][name]['confidence_intervals'] for name in model_names]
-            f1_scores = [shot_results['models'][name]['f1_scores'] for name in model_names]
-
-            # Plot shot curve with error bars - for accuracy
-            plot_shot_curve(
-                shot_sizes, accuracies, methods=model_names,
-                title="Accuracy vs Number of Shots",
-                save_path=os.path.join(results_dir, 'shot_curve_accuracy.png')
-            )
-
-            # Plot shot curve for F1 scores
-            plot_shot_curve(
-                shot_sizes, f1_scores, methods=model_names,
-                title="F1 Score vs Number of Shots",
-                save_path=os.path.join(results_dir, 'shot_curve_f1.png')
-            )
-
-            # Save shot experiment results
-            shot_exp_results = {
-                'shot_sizes': shot_sizes,
-                'models': {}
-            }
-
-            for i, name in enumerate(model_names):
-                shot_exp_results['models'][name] = {
-                    'accuracies': accuracies[i],
-                    'confidence_intervals': cis[i],
-                    'f1_scores': f1_scores[i]
-                }
-
-            with open(os.path.join(results_dir, 'shot_experiment_results.json'), 'w') as f:
-                json.dump(shot_exp_results, f, indent=4)
+                with open(os.path.join(results_dir, 'shot_experiment_results.json'), 'w') as f:
+                    json.dump(shot_exp_results, f, indent=4)
 
             # Create experiment visualizations
             print("\nGenerating model interpretability visualizations...")

@@ -11,11 +11,18 @@ class Config:
 
     # 数据集配置
     data_root = 'datasets/simulated'
-    all_classes = ["F15", "IDF", "F18"]
+    all_classes = ['EA-18G', 'EP-3E', 'F15', 'F22', 'F35', 'IDF']
     feature_size = 1000
+    # cross_validation_schemes = [
+    #     {
+    #         'base_classes': ['EA-18G', 'EP-3E', 'F2', 'F15', 'F16', 'F18'],
+    #         'novel_classes': ['F22', 'F35', 'IDF', '幻影2000', '捕食者', '全球鹰']
+    #     }
+    # ]
+
     cross_validation_schemes = [
         {
-            'base_classes': ['EA-18G', 'EP-3E', 'F2'],
+            'base_classes': ['EA-18G', 'EP-3E', 'F15'],
             'novel_classes': ['F22', 'F35', 'IDF']
         }
     ]
@@ -97,7 +104,7 @@ class Config:
     weight_decay = 0.01  # L2正则化系数
 
     # 数据增强配置
-    augmentation = False  # 是否使用数据增强
+    augmentation = True  # 是否使用数据增强
     noise_levels = [20, 15, 10, 5, 0]  # SNR in dB
     occlusion_ratio = 0.1  # 随机遮挡比例
     phase_jitter = 0.1  # 相位抖动幅度

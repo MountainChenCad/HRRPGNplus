@@ -428,32 +428,32 @@ def test_model(model, test_task_generator, device, num_tasks=None, shot=None):
     return avg_accuracy * 100, ci95 * 100, all_accuracies, avg_f1 * 100
 
 
-def shot_experiment(models, task_generator, device, shot_sizes=None):
+def run_shot_experiment(model, task_generator, device, shot_sizes=None):
     """
-    Run experiment with different shot sizes for multiple models
+    Run experiment with different shot sizes for a single model
 
     Args:
-        models: Dictionary of model_name -> model pairs or single model
+        model: The model to test
         task_generator: Task generator to sample tasks from
         device: Device to run on
         shot_sizes: List of shot sizes to test
 
     Returns:
-        Dictionary with results for each model
+        shot_sizes, accuracies, confidence_intervals, f1_scores
     """
-    from utils import compute_metrics, prepare_static_adjacency
-
-    # Handle single model case
-    if not isinstance(models, dict):
-        models = {'HRRPGraphNet': models}
+    from utils import prepare_static_adjacency
+    import numpy as np
+    import torch
+    from sklearn.metrics import f1_score
 
     # Default shot sizes if not specified
     if shot_sizes is None:
         shot_sizes = [1, 5, 10, 20]
 
-    # Filter to feasible shot sizes
-    max_k = task_generator.dataset.get_class_distribution()
-    min_samples = min([count for count in max_k.values() if count > 0])
+    # Filter to feasible shot sizes based on dataset
+    dataset = task_generator.dataset
+    class_dist = dataset.get_class_distribution()
+    min_samples = min([count for count in class_dist.values() if count > 0])
     feasible_shots = [k for k in shot_sizes if k < min_samples - 1]  # Need at least 1 for query
 
     if not feasible_shots:
@@ -462,141 +462,92 @@ def shot_experiment(models, task_generator, device, shot_sizes=None):
 
     print(f"Running shot experiment with sizes: {feasible_shots}")
 
-    # Initialize results
-    results = {
-        'shot_sizes': feasible_shots,
-        'models': {}
-    }
+    # Store results
+    accuracies = []
+    confidence_intervals = []
+    f1_scores = []
 
-    for model_name, model in models.items():
+    # For each shot size
+    for k in feasible_shots:
+        print(f"\nTesting with {k}-shot...")
+
+        # Update task generator
+        original_k_shot = task_generator.k_shot
+        original_q_query = task_generator.q_query
+        task_generator.k_shot = k
+        task_generator.q_query = min(original_q_query, min_samples - k)
+
+        # Move model to device
         model = model.to(device)
-        model_accuracies = []
-        model_cis = []
-        model_f1s = []
+        all_accuracies = []
+        all_preds = []
+        all_labels = []
 
-        # For each shot size
-        for k in feasible_shots:
-            print(f"\nTesting {model_name} with {k}-shot...")
+        # Test on multiple tasks
+        num_tasks = 100
+        for i in range(num_tasks):
+            try:
+                # Generate task
+                support_x, support_y, query_x, query_y = task_generator.generate_task()
 
-            # Update task generator
-            original_k_shot = task_generator.k_shot
-            original_q_query = task_generator.q_query
-            task_generator.k_shot = k
-            task_generator.q_query = min(original_q_query, min_samples - k)
+                # Move to device
+                support_x = support_x.to(device)
+                support_y = support_y.to(device)
+                query_x = query_x.to(device)
+                query_y = query_y.to(device)
 
-            # Run test
-            all_accuracies = []
-            all_preds = []
-            all_labels = []
+                # Fine-tune model (MAML-style)
+                if hasattr(model, 'clone'):
+                    # MAML models have clone method
+                    from train import MAMLPlusPlusTrainer
+                    temp_trainer = MAMLPlusPlusTrainer(model, device)
+                    adapted_model, _, _, _ = temp_trainer.inner_loop(support_x, support_y)
+                else:
+                    adapted_model = model
 
-            # Test on multiple tasks
-            num_tasks = 100  # Config.num_tasks
-            for i in range(num_tasks):
-                try:
-                    # Generate task
-                    support_x, support_y, query_x, query_y = task_generator.generate_task()
+                # Test on query set
+                adapted_model.eval()
+                batch_size, channels, seq_len = query_x.shape
+                static_adj = prepare_static_adjacency(batch_size, seq_len, device)
 
-                    # Move to device
-                    support_x = support_x.to(device)
-                    support_y = support_y.to(device)
-                    query_x = query_x.to(device)
-                    query_y = query_y.to(device)
+                with torch.no_grad():
+                    logits, _ = adapted_model(query_x, static_adj)
+                    preds = torch.argmax(logits, dim=1)
 
-                    # Fine-tune model (MAML-style)
-                    if hasattr(model, 'clone'):
-                        # MAML models have clone and adapt methods
-                        from train import MAMLPlusPlusTrainer
-                        temp_trainer = MAMLPlusPlusTrainer(model, device)
-                        adapted_model, _, _, _ = temp_trainer.inner_loop(support_x, support_y)
-                    else:
-                        # Non-MAML models - train on support set directly
-                        adapted_model = model
+                    # Calculate accuracy
+                    acc = (preds == query_y).float().mean().item()
+                    all_accuracies.append(acc)
 
-                        # If it's a ProtoNet or MatchingNet, they handle support set directly
-                        if model_name in ['ProtoNet', 'MatchingNet']:
-                            # Skip adaptation - these models use support set at inference time
-                            pass
-                        else:
-                            # For regular models, fine-tune with basic SGD
-                            optimizer = torch.optim.SGD(adapted_model.parameters(), lr=0.01)
-                            criterion = torch.nn.CrossEntropyLoss()
+                    # Store predictions and labels for metrics
+                    all_preds.extend(preds.cpu().numpy())
+                    all_labels.extend(query_y.cpu().numpy())
 
-                            # Simple fine-tuning loop
-                            adapted_model.train()
-                            for _ in range(5):  # Simple 5-step fine-tuning
-                                optimizer.zero_grad()
-                                logits, _ = adapted_model(support_x)
-                                loss = criterion(logits, support_y)
-                                loss.backward()
-                                optimizer.step()
+            except Exception as e:
+                print(f"Error in task {i}: {e}")
+                continue
 
-                    # Evaluate on query set
-                    adapted_model.eval()
-                    batch_size, channels, seq_len = query_x.shape
-                    static_adj = prepare_static_adjacency(batch_size, seq_len, device)
+        # Calculate metrics
+        avg_acc = np.mean(all_accuracies) * 100
+        std_acc = np.std(all_accuracies) * 100
+        ci = 1.96 * std_acc / np.sqrt(len(all_accuracies))
 
-                    with torch.no_grad():
-                        if model_name == 'ProtoNet':
-                            # ProtoNet inference
-                            support_features = adapted_model(support_x)
-                            query_features = adapted_model(query_x)
-                            prototypes = adapted_model.compute_prototypes(
-                                support_features, support_y, task_generator.n_way)
-                            dists = adapted_model.compute_distances(query_features, prototypes)
-                            preds = torch.argmin(dists, dim=1)
-                        elif model_name == 'MatchingNet':
-                            # MatchingNet inference
-                            logits, _ = model(query_x, support_set=support_x, support_labels=support_y)
+        # Compute F1 score
+        if len(set(all_labels)) > 1:  # Ensure we have at least 2 classes
+            f1 = f1_score(all_labels, all_preds, average='macro') * 100
+        else:
+            f1 = avg_acc  # If only one class, F1 equals accuracy
 
-                            # Get predictions
-                            _, preds = torch.max(logits, 1)
-                        else:
-                            # Standard inference
-                            logits, _ = adapted_model(query_x, static_adj)
-                            preds = torch.argmax(logits, dim=1)
+        print(f"Model {k}-shot accuracy: {avg_acc:.2f}% ± {ci:.2f}%, F1: {f1:.2f}%")
 
-                        # Compute accuracy
-                        acc = (preds == query_y).float().mean().item()
-                        all_accuracies.append(acc)
+        accuracies.append(avg_acc)
+        confidence_intervals.append(ci)
+        f1_scores.append(f1)
 
-                        # Collect predictions and labels for F1 score
-                        all_preds.extend(preds.cpu().numpy())
-                        all_labels.extend(query_y.cpu().numpy())
+        # Restore original task generator settings
+        task_generator.k_shot = original_k_shot
+        task_generator.q_query = original_q_query
 
-                except Exception as e:
-                    print(f"Error in task {i}: {e}")
-                    continue
-
-            # Compute metrics
-            avg_acc = np.mean(all_accuracies) * 100
-            std_acc = np.std(all_accuracies) * 100
-            ci = 1.96 * std_acc / np.sqrt(len(all_accuracies))
-
-            # Compute F1 score
-            from sklearn.metrics import f1_score
-            if len(set(all_labels)) > 1:  # Ensure we have at least 2 classes
-                f1 = f1_score(all_labels, all_preds, average='macro') * 100
-            else:
-                f1 = avg_acc  # If only one class, F1 equals accuracy
-
-            print(f"{model_name} {k}-shot accuracy: {avg_acc:.2f}% ± {ci:.2f}%, F1: {f1:.2f}%")
-
-            model_accuracies.append(avg_acc)
-            model_cis.append(ci)
-            model_f1s.append(f1)
-
-            # Restore original task generator settings
-            task_generator.k_shot = original_k_shot
-            task_generator.q_query = original_q_query
-
-        # Store results for this model
-        results['models'][model_name] = {
-            'accuracies': model_accuracies,
-            'confidence_intervals': model_cis,
-            'f1_scores': model_f1s
-        }
-
-    return results
+    return feasible_shots, accuracies, confidence_intervals, f1_scores
 
 
 def ablation_study_lambda(model, test_task_generator, device, lambda_values=None):
