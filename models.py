@@ -66,7 +66,19 @@ class MAMLModel(nn.Module):
         nn.init.xavier_uniform_(self.classifier.weight)
         nn.init.zeros_(self.classifier.bias)
 
+    def clone(self):
+        """Create a deep copy of the model for inner loop update"""
+        device = next(self.parameters()).device  # Get current device
+        clone = MAMLModel(num_classes=self.classifier.out_features)
+        clone.load_state_dict(self.state_dict())
+        clone = clone.to(device)  # Move clone to same device
+        return clone
+
     def forward(self, x, static_adj=None, return_features=False):
+        # Ensure input data is on the same device as model
+        device = next(self.parameters()).device
+        x = x.to(device)
+
         features = self.feature_extractor(x)
         logits = self.classifier(features)
 
@@ -74,19 +86,16 @@ class MAMLModel(nn.Module):
             return logits, features
         return logits, None
 
-    def clone(self):
-        """Create a deep copy of the model for inner loop update"""
-        clone = MAMLModel(num_classes=self.classifier.out_features)
-        clone.load_state_dict(self.state_dict())
-        return clone
-
     def adapt_params(self, loss, lr=0.01):
         """Update parameters based on loss, return updated parameter dictionary"""
-        grads = torch.autograd.grad(loss, self.parameters(), create_graph=True)
+        grads = torch.autograd.grad(loss, self.parameters(), create_graph=True, allow_unused=True)
 
         updated_params = {}
         for (name, param), grad in zip(self.named_parameters(), grads):
-            updated_params[name] = param - lr * grad
+            if grad is None:  # Handle unused parameters
+                updated_params[name] = param
+            else:
+                updated_params[name] = param - lr * grad
 
         return updated_params
 
@@ -115,7 +124,19 @@ class MAMLPlusPlusModel(nn.Module):
             'classifier': nn.Parameter(torch.ones(1) * 0.01)
         })
 
+    def clone(self):
+        """Create a deep copy of the model for inner loop update"""
+        device = next(self.parameters()).device  # Get current device
+        clone = MAMLPlusPlusModel(num_classes=self.classifier.out_features)
+        clone.load_state_dict(self.state_dict())
+        clone = clone.to(device)  # Move clone to same device
+        return clone
+
     def forward(self, x, static_adj=None, return_features=False):
+        # Ensure input data is on the same device as model
+        device = next(self.parameters()).device
+        x = x.to(device)
+
         features = self.feature_extractor(x)
         logits = self.classifier(features)
 
@@ -123,15 +144,9 @@ class MAMLPlusPlusModel(nn.Module):
             return logits, features
         return logits, None
 
-    def clone(self):
-        """Create a deep copy of the model for inner loop update"""
-        clone = MAMLPlusPlusModel(num_classes=self.classifier.out_features)
-        clone.load_state_dict(self.state_dict())
-        return clone
-
     def adapt_params(self, loss, lr=None):
         """Update parameters with per-layer adaptive learning rates"""
-        grads = torch.autograd.grad(loss, self.parameters(), create_graph=True)
+        grads = torch.autograd.grad(loss, self.parameters(), create_graph=True, allow_unused=True)
 
         updated_params = {}
         idx = 0
@@ -140,14 +155,24 @@ class MAMLPlusPlusModel(nn.Module):
         for name, param in self.feature_extractor.named_parameters():
             full_name = f'feature_extractor.{name}'
             lr_value = self.inner_lrs['feature_extractor'].item()
-            updated_params[full_name] = param - lr_value * grads[idx]
+
+            # Handle unused parameters
+            if grads[idx] is None:
+                updated_params[full_name] = param
+            else:
+                updated_params[full_name] = param - lr_value * grads[idx]
             idx += 1
 
         # Update classifier parameters
         for name, param in self.classifier.named_parameters():
             full_name = f'classifier.{name}'
             lr_value = self.inner_lrs['classifier'].item()
-            updated_params[full_name] = param - lr_value * grads[idx]
+
+            # Handle unused parameters
+            if grads[idx] is None:
+                updated_params[full_name] = param
+            else:
+                updated_params[full_name] = param - lr_value * grads[idx]
             idx += 1
 
         return updated_params
@@ -171,7 +196,19 @@ class ANILModel(nn.Module):
         nn.init.xavier_uniform_(self.classifier.weight)
         nn.init.zeros_(self.classifier.bias)
 
+    def clone(self):
+        """Create a deep copy of the model for inner loop update"""
+        device = next(self.parameters()).device  # Get current device
+        clone = ANILModel(num_classes=self.classifier.out_features)
+        clone.load_state_dict(self.state_dict())
+        clone = clone.to(device)  # Move clone to same device
+        return clone
+
     def forward(self, x, static_adj=None, return_features=False):
+        # Ensure input data is on the same device as model
+        device = next(self.parameters()).device
+        x = x.to(device)
+
         features = self.feature_extractor(x)
         logits = self.classifier(features)
 
@@ -179,19 +216,13 @@ class ANILModel(nn.Module):
             return logits, features
         return logits, None
 
-    def clone(self):
-        """Create a deep copy of the model for inner loop update"""
-        clone = ANILModel(num_classes=self.classifier.out_features)
-        clone.load_state_dict(self.state_dict())
-        return clone
-
     def adapt_params(self, loss, lr=0.01):
         """ANIL only updates classifier parameters"""
         # Get only the classifier parameters
         classifier_params = list(self.classifier.parameters())
 
         # Compute gradients only for classifier parameters
-        grads = torch.autograd.grad(loss, classifier_params, create_graph=True)
+        grads = torch.autograd.grad(loss, classifier_params, create_graph=True, allow_unused=True)
 
         updated_params = {}
         # Copy all parameters first
@@ -201,7 +232,10 @@ class ANILModel(nn.Module):
         # Update only classifier parameters
         for i, (name, param) in enumerate(self.classifier.named_parameters()):
             full_name = f'classifier.{name}'
-            updated_params[full_name] = param - lr * grads[i]
+            if grads[i] is None:  # Handle unused parameters
+                updated_params[full_name] = param
+            else:
+                updated_params[full_name] = param - lr * grads[i]
 
         return updated_params
 
@@ -225,11 +259,28 @@ class MetaSGDModel(nn.Module):
         nn.init.zeros_(self.classifier.bias)
 
         # Meta-SGD: Learnable per-parameter learning rates
+        # First create an empty ParameterDict
         self.lr_params = nn.ParameterDict()
-        for name, param in self.named_parameters():
-            self.lr_params[name.replace('.', '_')] = nn.Parameter(torch.ones_like(param) * 0.01)
+
+        # We'll initialize the learning rates after model creation
+        # to avoid mutating OrderedDict during iteration
+
+    def initialize_lr_params(self):
+        """Initialize learning rate parameters after model creation"""
+        # Create a list of parameters first to avoid mutating during iteration
+        param_list = [(name, param) for name, param in self.named_parameters()
+                      if 'lr_params' not in name]  # Exclude existing lr_params
+
+        # Now create learning rates for these parameters
+        for name, param in param_list:
+            param_name = name.replace('.', '_')
+            self.lr_params[param_name] = nn.Parameter(torch.ones_like(param) * 0.01)
 
     def forward(self, x, static_adj=None, return_features=False):
+        # Ensure input data is on the same device as model
+        device = next(self.parameters()).device
+        x = x.to(device)
+
         features = self.feature_extractor(x)
         logits = self.classifier(features)
 
@@ -239,22 +290,41 @@ class MetaSGDModel(nn.Module):
 
     def clone(self):
         """Create a deep copy of the model for inner loop update"""
+        device = next(self.parameters()).device
         clone = MetaSGDModel(num_classes=self.classifier.out_features)
+
+        # First initialize the lr_params in the clone to create the same structure
+        clone.initialize_lr_params()
+
+        # Now we can load the state dictionary with the matching structure
         clone.load_state_dict(self.state_dict())
+        clone = clone.to(device)
         return clone
 
     def adapt_params(self, loss, lr=None):
         """Update parameters with learnable per-parameter learning rates"""
-        grads = torch.autograd.grad(loss, self.parameters(), create_graph=True)
+        grads = torch.autograd.grad(loss, self.parameters(), create_graph=True, allow_unused=True)
 
         updated_params = {}
         for (name, param), grad in zip(self.named_parameters(), grads):
+            # Skip lr_params themselves when adapting
+            if 'lr_params' in name:
+                updated_params[name] = param
+                continue
+
             # Get corresponding learning rate parameter
             lr_name = name.replace('.', '_')
-            param_lr = self.lr_params[lr_name]
+            if lr_name in self.lr_params:
+                param_lr = self.lr_params[lr_name]
+            else:
+                # Fallback to default learning rate if not found
+                param_lr = torch.tensor(0.01, device=param.device)
 
             # Update parameters with per-parameter learning rates
-            updated_params[name] = param - param_lr * grad
+            if grad is None:  # Handle unused parameters
+                updated_params[name] = param
+            else:
+                updated_params[name] = param - param_lr * grad
 
         return updated_params
 
@@ -708,6 +778,10 @@ class CNNModel(nn.Module):
         )
 
     def forward(self, x, static_adj=None, return_features=False, extract_attention=False):
+        # Ensure input data is on the same device as model
+        device = next(self.parameters()).device
+        x = x.to(device)
+
         features = self.cnn(x).squeeze(-1)
         logits = self.fc(features)
 
@@ -740,6 +814,10 @@ class LSTMModel(nn.Module):
         )
 
     def forward(self, x, static_adj=None, return_features=False, extract_attention=False):
+        # Ensure input data is on the same device as model
+        device = next(self.parameters()).device
+        x = x.to(device)
+
         # 重塑用于LSTM的数据：[batch, channels, seq_len] -> [batch, seq_len, channels]
         x = x.transpose(1, 2)
         lstm_out, _ = self.lstm(x)
@@ -773,14 +851,18 @@ class GCNModel(nn.Module):
 
         self.dropout = nn.Dropout(0.3)
 
-    # models.py 中的 GCNModel 类
     def forward(self, x, static_adj=None, return_features=False, extract_attention=False):
+        # Ensure input data is on the same device as model
+        device = next(self.parameters()).device
+        x = x.to(device)
+
         if static_adj is None:
             batch_size, _, seq_len = x.size()
-            device = x.device
             # 基于距离创建固定的邻接矩阵
             static_adj = self._create_distance_adj(seq_len).to(device)
             static_adj = static_adj.unsqueeze(0).expand(batch_size, -1, -1)
+        else:
+            static_adj = static_adj.to(device)
 
         # 特征提取
         x = self.feature_extractor(x)
@@ -837,6 +919,10 @@ class GATModel(nn.Module):
         self.dropout = nn.Dropout(0.3)
 
     def forward(self, x, static_adj=None, return_features=False, extract_attention=False):
+        # Ensure input data is on the same device as model
+        device = next(self.parameters()).device
+        x = x.to(device)
+
         # 特征提取
         x = self.feature_extractor(x)
         x = self.feature_enhance(x)

@@ -1403,6 +1403,10 @@ def compare_with_baselines(dataset, device, shot=5, baseline_models=None, num_ta
         model = model_constructors[model_name](num_classes=n_way)
         model = model.to(device)
 
+        # Initialize learning rate parameters for Meta-SGD
+        if model_name == 'Meta-SGD':
+            model.initialize_lr_params()
+
         all_accuracies = []
         all_preds = []
         all_labels = []
