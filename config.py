@@ -9,21 +9,20 @@ class Config:
     seed = 42
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # 数据集配置
     data_root = 'datasets/simulated'
     all_classes = ['EA-18G', 'EP-3E', 'F15', 'F22', 'F35', 'IDF']
     feature_size = 1000
-    # cross_validation_schemes = [
-    #     {
-    #         'base_classes': ['EA-18G', 'EP-3E', 'F2', 'F15', 'F16', 'F18'],
-    #         'novel_classes': ['F22', 'F35', 'IDF', '幻影2000', '捕食者', '全球鹰']
-    #     }
-    # ]
-
+    # # cross_validation_schemes = [
+    # #     {
+    # #         'base_classes': ['EA-18G', 'EP-3E', 'F2', 'F15', 'F16', 'F18'],
+    # #         'novel_classes': ['F22', 'F35', 'IDF', '幻影2000', '捕食者', '全球鹰']
+    # #     }
+    # # ]
+    #
     cross_validation_schemes = [
         {
-            'base_classes': ['EA-18G', 'EP-3E', 'F15'],
-            'novel_classes': ['F22', 'F35', 'IDF']
+            'base_classes': ['EA-18G', 'EP-3E', 'F2', 'F15', 'F16'],
+            'novel_classes': ['F22', 'F35', 'IDF', '幻影2000', '捕食者']
         }
     ]
 
@@ -36,15 +35,15 @@ class Config:
     #         'novel_classes': ['an26', 'citation', 'yar42']
     #     }
     # ]
-
-    train_dir = os.path.join(data_root, 'train')
-    test_dir = os.path.join(data_root, 'test')
+    #
+    # train_dir = os.path.join(data_root, 'train')
+    # test_dir = os.path.join(data_root, 'test')
 
     # 小样本学习配置
-    n_way = 3  # N-way分类
+    n_way = 5  # N-way分类
     k_shot = 5  # K-shot (支持集每类样本数)
     q_query = 15  # 查询集每类样本数
-    num_tasks = 100  # 600
+    num_tasks = 600  # 600
 
     # 交叉验证方案
 
@@ -66,7 +65,7 @@ class Config:
     inner_steps = 5  # 内循环更新步数
     task_batch_size = 1  # 4
     max_epochs = 300  # 最大迭代轮次
-    patience = 100  # 100
+    patience = 300  # 100
 
     # MAML++ 多步骤损失权重
     # 按步骤递增的权重，越靠后的步骤权重越大
@@ -104,7 +103,7 @@ class Config:
     weight_decay = 0.01  # L2正则化系数
 
     # 数据增强配置
-    augmentation = True  # 是否使用数据增强
+    augmentation = False  # 是否使用数据增强
     noise_levels = [20, 15, 10, 5, 0]  # SNR in dB
     occlusion_ratio = 0.1  # 随机遮挡比例
     phase_jitter = 0.1  # 相位抖动幅度

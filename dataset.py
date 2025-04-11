@@ -121,7 +121,6 @@ class HRRPDataset(Dataset):
             # 转换为幅度并展平
             magnitude = np.abs(hrrp_data).flatten()
 
-            # 确保长度为500
             if len(magnitude) < Config.feature_size:
                 padded = np.zeros(Config.feature_size)
                 padded[:len(magnitude)] = magnitude
