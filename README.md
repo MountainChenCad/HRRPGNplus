@@ -9,7 +9,7 @@ HRRPGraphNet++ revolutionizes few-shot HRRP RATR through graph neural networks a
 
 > High-Resolution Range Profile (HRRP) radar recognition suffers from data scarcity challenges in operational settings. We present HRRPGraphNet++, a framework combining dynamic graph neural networks with meta-learning for few-shot HRRP recognition. Our approach generates graph representations dynamically through multi-head attention mechanisms that adapt to target-specific scattering characteristics, integrated with a specialized meta-learning framework employing layer-wise learning rates. Experiments demonstrate state-of-the-art performance in 1-shot (82.3%), 5-shot (91.8%), and 20-shot (94.7%) settings, with enhanced noise robustness (68.7% accuracy at 0dB SNR). Our hybrid graph mechanism combines physical priors with learned relationships, significantly outperforming conventional methods in challenging operational scenarios.
 ><p align="center">
-  > <img src="./architecture.jpg" width="40%">
+  > <img src="./architecture.jpg" width="100%">
 </p>
 
 ---
