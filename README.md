@@ -1,13 +1,13 @@
 
 
-# HRRPGraphNet :satellite: 
-**Accepted to IET Electronics Letters 2024** :tada::tada::tada:
+# HRRPGraphNet++ :satellite: 
+**Manuscript currently under review of Remote Sensing 2025. We are still uploading the codes, please wait!**
 
-HRRPGraphNet revolutionizes HRRP data processing through graph neural networks, achieving efficient radar target recognition :zap:.
+HRRPGraphNet++ revolutionizes few-shot HRRP RATR through graph neural networks and meta-learning, achieving efficient radar target recognition :zap:.
 
 ---
 
-> High Resolution Range Profiles (HRRPs) have become a key area of focus in the domain of Radar Automatic Target Recognition (RATR). Despite the success of deep learning based HRRP recognition, these methods need a large amount of training samples to generate good performance, which could be a severe challenge under non-cooperative circumstances. Currently, deep learning-based models treat HRRPs as sequences, which may lead to ignorance of the internal relationship of range cells. This letter proposes HRRPGraphNet, a novel graph-theoretic approach, whose primary innovation is the use of the graph-theory of HRRP which models the spatial relationships among range cells through a range cell amplitude-based node vector and a range-relative adjacency matrix, enabling efficient extraction of both local and global features in noneuclidean space. Experiments on the aircraft electromagnetic simulation dataset confirmed HRRPGraphNet's superior accuracy and robustness compared with existing methods, particularly in limited training sample condition. This underscores the potential of graph-driven innovations in enhancing HRRP-based RATR, offering a significant advancement over sequence-based methods.
+> High-Resolution Range Profile (HRRP) radar recognition suffers from data scarcity challenges in operational settings. We present HRRPGraphNet++, a framework combining dynamic graph neural networks with meta-learning for few-shot HRRP recognition. Our approach generates graph representations dynamically through multi-head attention mechanisms that adapt to target-specific scattering characteristics, integrated with a specialized meta-learning framework employing layer-wise learning rates. Experiments demonstrate state-of-the-art performance in 1-shot (82.3%), 5-shot (91.8%), and 20-shot (94.7%) settings, with enhanced noise robustness (68.7% accuracy at 0dB SNR). Our hybrid graph mechanism combines physical priors with learned relationships, significantly outperforming conventional methods in challenging operational scenarios.
 ><p align="center">
   > <img src="./architecture.jpg" width="40%">
 </p>
